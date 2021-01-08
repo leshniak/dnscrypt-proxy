@@ -46,6 +46,7 @@ const (
 	PluginsReturnCodeNetworkError
 	PluginsReturnCodeCloak
 	PluginsReturnCodeServerTimeout
+	PluginsReturnCodeNotReady
 )
 
 var PluginsReturnCodeToString = map[PluginsReturnCode]string{
@@ -61,38 +62,42 @@ var PluginsReturnCodeToString = map[PluginsReturnCode]string{
 	PluginsReturnCodeNetworkError:  "NETWORK_ERROR",
 	PluginsReturnCodeCloak:         "CLOAK",
 	PluginsReturnCodeServerTimeout: "SERVER_TIMEOUT",
+	PluginsReturnCodeNotReady:      "NOT_READY",
 }
 
 type PluginsState struct {
-	sessionData                      map[string]interface{}
-	action                           PluginsAction
-	maxUnencryptedUDPSafePayloadSize int
-	originalMaxPayloadSize           int
-	maxPayloadSize                   int
-	clientProto                      string
-	clientAddr                       *net.Addr
-	synthResponse                    *dns.Msg
-	dnssec                           bool
-	cacheSize                        int
-	cacheNegMinTTL                   uint32
-	cacheNegMaxTTL                   uint32
-	cacheMinTTL                      uint32
-	cacheMaxTTL                      uint32
-	rejectTTL                        uint32
-	questionMsg                      *dns.Msg
-	qName                            string
 	requestStart                     time.Time
 	requestEnd                       time.Time
-	cacheHit                         bool
-	returnCode                       PluginsReturnCode
+	clientProto                      string
 	serverName                       string
 	serverProto                      string
+	qName                            string
+	clientAddr                       *net.Addr
+	synthResponse                    *dns.Msg
+	questionMsg                      *dns.Msg
+	sessionData                      map[string]interface{}
+	action                           PluginsAction
 	timeout                          time.Duration
+	returnCode                       PluginsReturnCode
+	maxPayloadSize                   int
+	cacheSize                        int
+	originalMaxPayloadSize           int
+	maxUnencryptedUDPSafePayloadSize int
+	rejectTTL                        uint32
+	cacheMaxTTL                      uint32
+	cacheNegMaxTTL                   uint32
+	cacheNegMinTTL                   uint32
+	cacheMinTTL                      uint32
+	cacheHit                         bool
+	dnssec                           bool
 }
 
 func (proxy *Proxy) InitPluginsGlobals() error {
 	queryPlugins := &[]Plugin{}
 
+	if proxy.captivePortalMap != nil {
+		*queryPlugins = append(*queryPlugins, Plugin(new(PluginCaptivePortal)))
+	}
 	if len(proxy.queryMeta) != 0 {
 		*queryPlugins = append(*queryPlugins, Plugin(new(PluginQueryMeta)))
 	}
@@ -131,6 +136,9 @@ func (proxy *Proxy) InitPluginsGlobals() error {
 	responsePlugins := &[]Plugin{}
 	if len(proxy.nxLogFile) != 0 {
 		*responsePlugins = append(*responsePlugins, Plugin(new(PluginNxLog)))
+	}
+	if len(proxy.allowedIPFile) != 0 {
+		*responsePlugins = append(*responsePlugins, Plugin(new(PluginAllowedIP)))
 	}
 	if len(proxy.blockNameFile) != 0 {
 		*responsePlugins = append(*responsePlugins, Plugin(new(PluginBlockNameResponse)))

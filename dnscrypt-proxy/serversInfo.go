@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math/bits"
 	"math/rand"
 	"net"
 	"net/url"
@@ -42,25 +43,24 @@ type DOHClientCreds struct {
 }
 
 type ServerInfo struct {
-	Proto              stamps.StampProtoType
-	MagicQuery         [8]byte
-	ServerPk           [32]byte
-	SharedKey          [32]byte
-	CryptoConstruction CryptoConstruction
+	DOHClientCreds     DOHClientCreds
+	lastActionTS       time.Time
+	rtt                ewma.MovingAverage
 	Name               string
-	Timeout            time.Duration
-	URL                *url.URL
 	HostName           string
 	UDPAddr            *net.UDPAddr
 	TCPAddr            *net.TCPAddr
-	RelayUDPAddr       *net.UDPAddr
-	RelayTCPAddr       *net.TCPAddr
-	knownBugs          ServerBugs
-	lastActionTS       time.Time
-	rtt                ewma.MovingAverage
+	Relay              *Relay
+	URL                *url.URL
 	initialRtt         int
+	Timeout            time.Duration
+	CryptoConstruction CryptoConstruction
+	ServerPk           [32]byte
+	SharedKey          [32]byte
+	MagicQuery         [8]byte
+	knownBugs          ServerBugs
+	Proto              stamps.StampProtoType
 	useGet             bool
-	DOHClientCreds     DOHClientCreds
 }
 
 type LBStrategy interface {
@@ -98,6 +98,19 @@ func (LBStrategyRandom) getCandidate(serversCount int) int {
 }
 
 var DefaultLBStrategy = LBStrategyP2{}
+
+type DNSCryptRelay struct {
+	RelayUDPAddr *net.UDPAddr
+	RelayTCPAddr *net.TCPAddr
+}
+
+type ODoHRelay struct{}
+
+type Relay struct {
+	Proto    stamps.StampProtoType
+	Dnscrypt *DNSCryptRelay
+	ODoH     *ODoHRelay
+}
 
 type ServersInfo struct {
 	sync.RWMutex
@@ -152,11 +165,14 @@ func (serversInfo *ServersInfo) refreshServer(proxy *Proxy, name string, stamp s
 			break
 		}
 	}
-	if isNew {
-		serversInfo.inner = append(serversInfo.inner, &newServer)
-		serversInfo.registeredServers = append(serversInfo.registeredServers, RegisteredServer{name: name, stamp: stamp})
-	}
 	serversInfo.Unlock()
+	if isNew {
+		serversInfo.Lock()
+		serversInfo.inner = append(serversInfo.inner, &newServer)
+		serversInfo.Unlock()
+		proxy.serversInfo.registerServer(name, stamp)
+	}
+
 	return nil
 }
 
@@ -248,66 +264,139 @@ func fetchServerInfo(proxy *Proxy, name string, stamp stamps.ServerStamp, isNew 
 	} else if stamp.Proto == stamps.StampProtoTypeDoH {
 		return fetchDoHServerInfo(proxy, name, stamp, isNew)
 	}
-	return ServerInfo{}, errors.New("Unsupported protocol")
+	return ServerInfo{}, fmt.Errorf("Unsupported protocol for [%s]: [%s]", name, stamp.Proto.String())
 }
 
-func route(proxy *Proxy, name string) (*net.UDPAddr, *net.TCPAddr, error) {
+func findFarthestRoute(proxy *Proxy, name string, relayStamps []stamps.ServerStamp) *stamps.ServerStamp {
+	serverIdx := -1
+	proxy.serversInfo.RLock()
+	for i, registeredServer := range proxy.serversInfo.registeredServers {
+		if registeredServer.name == name {
+			serverIdx = i
+			break
+		}
+	}
+	if serverIdx < 0 {
+		return nil
+	}
+	server := proxy.serversInfo.registeredServers[serverIdx]
+	proxy.serversInfo.RUnlock()
+	serverAddrStr, _ := ExtractHostAndPort(server.stamp.ServerAddrStr, 443)
+	serverAddr := net.ParseIP(serverAddrStr)
+	if serverAddr == nil {
+		return nil
+	}
+	if len(proxy.registeredRelays) == 0 {
+		return nil
+	}
+	bestRelayIdxs := make([]int, 0)
+	bestRelaySamePrefixBits := 128
+	for relayIdx, relayStamp := range relayStamps {
+		relayAddrStr, _ := ExtractHostAndPort(relayStamp.ServerAddrStr, 443)
+		relayAddr := net.ParseIP(relayAddrStr)
+		if relayAddr == nil {
+			continue
+		}
+		relayIsIPv6 := relayAddr.To4() == nil
+		if relayIsIPv6 != (serverAddr.To4() == nil) {
+			continue
+		}
+		firstByte := 0
+		if !relayIsIPv6 {
+			firstByte = 12
+		}
+		samePrefixBits := 0
+		for i := firstByte; i < 16; i++ {
+			x := serverAddr[i] ^ relayAddr[i]
+			samePrefixBits += bits.LeadingZeros8(x)
+			if x != 0 {
+				break
+			}
+		}
+		if samePrefixBits <= bestRelaySamePrefixBits {
+			bestRelaySamePrefixBits = samePrefixBits
+			bestRelayIdxs = append(bestRelayIdxs, relayIdx)
+		}
+	}
+	return &relayStamps[bestRelayIdxs[rand.Intn(len(bestRelayIdxs))]]
+}
+
+func route(proxy *Proxy, name string) (*Relay, error) {
 	routes := proxy.routes
 	if routes == nil {
-		return nil, nil, nil
+		return nil, nil
 	}
+	wildcard := false
 	relayNames, ok := (*routes)[name]
 	if !ok {
+		wildcard = true
 		relayNames, ok = (*routes)["*"]
 	}
 	if !ok {
-		return nil, nil, nil
+		return nil, nil
 	}
-	var relayName string
-	if len(relayNames) > 0 {
-		candidate := rand.Intn(len(relayNames))
-		relayName = relayNames[candidate]
+	relayStamps := make([]stamps.ServerStamp, 0)
+	for _, relayName := range relayNames {
+		if relayStamp, err := stamps.NewServerStampFromString(relayName); err == nil {
+			relayStamps = append(relayStamps, relayStamp)
+		} else if relayName == "*" {
+			for _, registeredServer := range proxy.registeredRelays {
+				relayStamps = append(relayStamps, registeredServer.stamp)
+			}
+			wildcard = true
+			break
+		} else {
+			for _, registeredServer := range proxy.registeredRelays {
+				if registeredServer.name == relayName {
+					relayStamps = append(relayStamps, registeredServer.stamp)
+					break
+				}
+			}
+			proxy.serversInfo.RLock()
+			for _, registeredServer := range proxy.serversInfo.registeredServers {
+				if registeredServer.name == relayName {
+					relayStamps = append(relayStamps, registeredServer.stamp)
+					break
+				}
+			}
+			proxy.serversInfo.RUnlock()
+		}
+	}
+	if len(relayStamps) == 0 {
+		return nil, fmt.Errorf("Empty relay set for [%v]", name)
 	}
 	var relayCandidateStamp *stamps.ServerStamp
-	if len(relayName) == 0 {
-		return nil, nil, fmt.Errorf("Route declared for [%v] but an empty relay list", name)
-	} else if relayStamp, err := stamps.NewServerStampFromString(relayName); err == nil {
-		relayCandidateStamp = &relayStamp
-	} else if _, err := net.ResolveUDPAddr("udp", relayName); err == nil {
-		relayCandidateStamp = &stamps.ServerStamp{
-			ServerAddrStr: relayName,
-			Proto:         stamps.StampProtoTypeDNSCryptRelay,
-		}
+	if !wildcard || len(relayStamps) == 1 {
+		relayCandidateStamp = &relayStamps[rand.Intn(len(relayStamps))]
 	} else {
-		for _, registeredServer := range proxy.registeredRelays {
-			if registeredServer.name == relayName {
-				relayCandidateStamp = &registeredServer.stamp
-				break
-			}
-		}
-		for _, registeredServer := range proxy.registeredServers {
-			if registeredServer.name == relayName {
-				relayCandidateStamp = &registeredServer.stamp
-				break
-			}
-		}
+		relayCandidateStamp = findFarthestRoute(proxy, name, relayStamps)
 	}
 	if relayCandidateStamp == nil {
-		return nil, nil, fmt.Errorf("Undefined relay [%v] for server [%v]", relayName, name)
+		return nil, fmt.Errorf("No valid relay for server [%v]", name)
 	}
-	if relayCandidateStamp.Proto == stamps.StampProtoTypeDNSCrypt ||
-		relayCandidateStamp.Proto == stamps.StampProtoTypeDNSCryptRelay {
+	relayName := relayCandidateStamp.ServerAddrStr
+	for _, registeredServer := range proxy.registeredRelays {
+		if registeredServer.stamp.ServerAddrStr == relayCandidateStamp.ServerAddrStr {
+			relayName = registeredServer.name
+			break
+		}
+	}
+	switch relayCandidateStamp.Proto {
+	case stamps.StampProtoTypeDNSCrypt, stamps.StampProtoTypeDNSCryptRelay:
 		relayUDPAddr, err := net.ResolveUDPAddr("udp", relayCandidateStamp.ServerAddrStr)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		relayTCPAddr, err := net.ResolveTCPAddr("tcp", relayCandidateStamp.ServerAddrStr)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
-		return relayUDPAddr, relayTCPAddr, nil
+		dlog.Noticef("Anonymizing queries for [%v] via [%v]", name, relayName)
+		return &Relay{Proto: stamps.StampProtoTypeDNSCryptRelay, Dnscrypt: &DNSCryptRelay{RelayUDPAddr: relayUDPAddr, RelayTCPAddr: relayTCPAddr}}, nil
+	case stamps.StampProtoTypeODoHRelay:
+		return &Relay{Proto: stamps.StampProtoTypeODoHRelay, ODoH: &ODoHRelay{}}, nil
 	}
-	return nil, nil, fmt.Errorf("Invalid relay [%v] for server [%v]", relayName, name)
+	return nil, fmt.Errorf("Invalid relay set for server [%v]", name)
 }
 
 func fetchDNSCryptServerInfo(proxy *Proxy, name string, stamp stamps.ServerStamp, isNew bool) (ServerInfo, error) {
@@ -327,22 +416,26 @@ func fetchDNSCryptServerInfo(proxy *Proxy, name string, stamp stamps.ServerStamp
 			break
 		}
 	}
-	relayUDPAddr, relayTCPAddr, err := route(proxy, name)
+	relay, err := route(proxy, name)
 	if err != nil {
 		return ServerInfo{}, err
 	}
-	certInfo, rtt, fragmentsBlocked, err := FetchCurrentDNSCryptCert(proxy, &name, proxy.mainProto, stamp.ServerPk, stamp.ServerAddrStr, stamp.ProviderName, isNew, relayUDPAddr, relayTCPAddr, knownBugs)
+	var dnscryptRelay *DNSCryptRelay
+	if relay != nil {
+		dnscryptRelay = relay.Dnscrypt
+	}
+	certInfo, rtt, fragmentsBlocked, err := FetchCurrentDNSCryptCert(proxy, &name, proxy.mainProto, stamp.ServerPk, stamp.ServerAddrStr, stamp.ProviderName, isNew, dnscryptRelay, knownBugs)
 	if !knownBugs.fragmentsBlocked && fragmentsBlocked {
 		dlog.Debugf("[%v] drops fragmented queries", name)
 		knownBugs.fragmentsBlocked = true
 	}
-	if knownBugs.fragmentsBlocked && (relayUDPAddr != nil || relayTCPAddr != nil) {
-		relayTCPAddr, relayUDPAddr = nil, nil
-		if proxy.skipAnonIncompatbibleResolvers {
-			dlog.Infof("[%v] is incompatible with anonymization, it will be ignored", name)
-			return ServerInfo{}, errors.New("Resolver is incompatible with anonymization")
+	if knownBugs.fragmentsBlocked && relay != nil && relay.Dnscrypt != nil {
+		relay = nil
+		if proxy.skipAnonIncompatibleResolvers {
+			dlog.Infof("[%v] couldn't be reached anonymously, it will be ignored", name)
+			return ServerInfo{}, errors.New("Resolver couldn't be reached anonymously")
 		}
-		dlog.Warnf("[%v] is incompatible with anonymization", name)
+		dlog.Warnf("[%v] couldn't be reached anonymously", name)
 	}
 	if err != nil {
 		return ServerInfo{}, err
@@ -365,8 +458,7 @@ func fetchDNSCryptServerInfo(proxy *Proxy, name string, stamp stamps.ServerStamp
 		Timeout:            proxy.timeout,
 		UDPAddr:            remoteUDPAddr,
 		TCPAddr:            remoteTCPAddr,
-		RelayUDPAddr:       relayUDPAddr,
-		RelayTCPAddr:       relayTCPAddr,
+		Relay:              relay,
 		initialRtt:         rtt,
 		knownBugs:          knownBugs,
 	}, nil
@@ -466,7 +558,9 @@ func fetchDoHServerInfo(proxy *Proxy, name string, stamp stamps.ServerStamp, isN
 	}
 	protocol := tls.NegotiatedProtocol
 	if len(protocol) == 0 {
-		protocol = "h1"
+		protocol = "http/1.x"
+	}
+	if strings.HasPrefix(protocol, "http/1.") {
 		dlog.Warnf("[%s] does not support HTTP/2", name)
 	}
 	dlog.Infof("[%s] TLS version: %x - Protocol: %v - Cipher suite: %v", name, tls.Version, protocol, tls.CipherSuite)
