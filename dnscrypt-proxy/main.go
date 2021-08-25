@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	AppVersion            = "2.0.45"
+	AppVersion            = "2.1.0"
 	DefaultConfigFileName = "dnscrypt-proxy.toml"
 )
 
@@ -29,6 +29,7 @@ type App struct {
 func main() {
 	TimezoneSetup()
 	dlog.Init("dnscrypt-proxy", dlog.SeverityNotice, "DAEMON")
+	runtime.MemProfileRate = 0
 
 	seed := make([]byte, 8)
 	crypto_rand.Read(seed)
