@@ -9,7 +9,7 @@
 
 ## Overview
 
-A flexible DNS proxy, with support for modern encrypted DNS protocols such as [DNSCrypt v2](https://dnscrypt.info/protocol), [DNS-over-HTTPS](https://www.rfc-editor.org/rfc/rfc8484.txt), [Anonymized DNSCrypt](https://github.com/DNSCrypt/dnscrypt-protocol/blob/master/ANONYMIZED-DNSCRYPT.txt) and [ODoH (Oblivious DoH)](https://github.com/DNSCrypt/dnscrypt-resolvers/blob/master/v3/odoh.md).
+A flexible DNS proxy, with support for modern encrypted DNS protocols such as [DNSCrypt v2](https://dnscrypt.info/protocol), [DNS-over-HTTPS](https://www.rfc-editor.org/rfc/rfc8484.txt), [Anonymized DNSCrypt](https://github.com/DNSCrypt/dnscrypt-protocol/blob/master/ANONYMIZED-DNSCRYPT.txt) and [ODoH (Oblivious DoH)](https://github.com/DNSCrypt/dnscrypt-resolvers/blob/master/v3/odoh-servers.md).
 
 * **[dnscrypt-proxy documentation](https://dnscrypt.info/doc) ← Start here**
 * [DNSCrypt project home page](https://dnscrypt.info/)
@@ -74,7 +74,7 @@ How to use these files, as well as how to verify their signatures, are documente
 
 ### Code Contributors
 
-This project exists thanks to all the people who contribute. [[Contribute](CONTRIBUTING.md)].
+This project exists thanks to all the people who contribute.
 <a href="https://github.com/dnscrypt/dnscrypt-proxy/graphs/contributors"><img src="https://opencollective.com/dnscrypt/contributors.svg?width=890&button=false" /></a>
 
 ### Financial Contributors
