@@ -50,7 +50,15 @@ func (plugin *PluginBlockIPv6) Eval(pluginsState *PluginsState, msg *dns.Msg) er
 		if !plugin.proxy.clientsCountInc() {
 			return errors.New("Too many concurrent connections to handle block_ipv6_dual_stack subqueries")
 		}
-		respAPacket := plugin.proxy.processIncomingQuery("trampoline", plugin.proxy.mainProto, msgAPacket, nil, nil, time.Now(), false)
+		respAPacket := plugin.proxy.processIncomingQuery(
+			"trampoline",
+			plugin.proxy.mainProto,
+			msgAPacket,
+			nil,
+			nil,
+			time.Now(),
+			false,
+		)
 		plugin.proxy.clientsCountDec()
 		respA := dns.Msg{}
 		if err := respA.Unpack(respAPacket); err != nil {

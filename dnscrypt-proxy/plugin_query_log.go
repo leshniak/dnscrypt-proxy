@@ -56,7 +56,9 @@ func (plugin *PluginQueryLog) Eval(pluginsState *PluginsState, msg *dns.Msg) err
 		}
 	}
 	var clientIPStr string
-	if pluginsState.clientProto == "udp" {
+	if pluginsState.clientAddr == nil {
+		clientIPStr = "-"
+	} else if pluginsState.clientProto == "udp" {
 		clientIPStr = (*pluginsState.clientAddr).(*net.UDPAddr).IP.String()
 	} else {
 		clientIPStr = (*pluginsState.clientAddr).(*net.TCPAddr).IP.String()
