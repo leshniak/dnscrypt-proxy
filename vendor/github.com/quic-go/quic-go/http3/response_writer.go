@@ -3,9 +3,11 @@ package http3
 import (
 	"bufio"
 	"bytes"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/internal/utils"
@@ -15,12 +17,15 @@ import (
 
 type responseWriter struct {
 	conn        quic.Connection
+	str         quic.Stream
 	bufferedStr *bufio.Writer
 	buf         []byte
 
 	header        http.Header
 	status        int // status code passed to WriteHeader
 	headerWritten bool
+	contentLen    int64 // if handler set valid Content-Length header
+	numWritten    int64 // bytes written
 
 	logger utils.Logger
 }
@@ -36,6 +41,7 @@ func newResponseWriter(str quic.Stream, conn quic.Connection, logger utils.Logge
 		header:      http.Header{},
 		buf:         make([]byte, 16),
 		conn:        conn,
+		str:         str,
 		bufferedStr: bufio.NewWriter(str),
 		logger:      logger,
 	}
@@ -50,8 +56,30 @@ func (w *responseWriter) WriteHeader(status int) {
 		return
 	}
 
-	if status < 100 || status >= 200 {
+	// http status must be 3 digits
+	if status < 100 || status > 999 {
+		panic(fmt.Sprintf("invalid WriteHeader code %v", status))
+	}
+
+	if status >= 200 {
 		w.headerWritten = true
+		// Add Date header.
+		// This is what the standard library does.
+		// Can be disabled by setting the Date header to nil.
+		if _, ok := w.header["Date"]; !ok {
+			w.header.Set("Date", time.Now().UTC().Format(http.TimeFormat))
+		}
+		// Content-Length checking
+		// use ParseUint instead of ParseInt, as negative values are invalid
+		if clen := w.header.Get("Content-Length"); clen != "" {
+			if cl, err := strconv.ParseUint(clen, 10, 63); err == nil {
+				w.contentLen = int64(cl)
+			} else {
+				// emit a warning for malformed Content-Length and remove it
+				w.logger.Errorf("Malformed Content-Length %s", clen)
+				w.header.Del("Content-Length")
+			}
+		}
 	}
 	w.status = status
 
@@ -80,12 +108,34 @@ func (w *responseWriter) WriteHeader(status int) {
 }
 
 func (w *responseWriter) Write(p []byte) (int, error) {
+	bodyAllowed := bodyAllowedForStatus(w.status)
 	if !w.headerWritten {
+		// If body is not allowed, we don't need to (and we can't) sniff the content type.
+		if bodyAllowed {
+			// If no content type, apply sniffing algorithm to body.
+			// We can't use `w.header.Get` here since if the Content-Type was set to nil, we shoundn't do sniffing.
+			_, haveType := w.header["Content-Type"]
+
+			// If the Transfer-Encoding or Content-Encoding was set and is non-blank,
+			// we shouldn't sniff the body.
+			hasTE := w.header.Get("Transfer-Encoding") != ""
+			hasCE := w.header.Get("Content-Encoding") != ""
+			if !hasCE && !haveType && !hasTE && len(p) > 0 {
+				w.header.Set("Content-Type", http.DetectContentType(p))
+			}
+		}
 		w.WriteHeader(http.StatusOK)
+		bodyAllowed = true
 	}
-	if !bodyAllowedForStatus(w.status) {
+	if !bodyAllowed {
 		return 0, http.ErrBodyNotAllowed
 	}
+
+	w.numWritten += int64(len(p))
+	if w.contentLen != 0 && w.numWritten > w.contentLen {
+		return 0, http.ErrContentLength
+	}
+
 	df := &dataFrame{Length: uint64(len(p))}
 	w.buf = w.buf[:0]
 	w.buf = df.Append(w.buf)
@@ -95,14 +145,26 @@ func (w *responseWriter) Write(p []byte) (int, error) {
 	return w.bufferedStr.Write(p)
 }
 
+func (w *responseWriter) FlushError() error {
+	return w.bufferedStr.Flush()
+}
+
 func (w *responseWriter) Flush() {
-	if err := w.bufferedStr.Flush(); err != nil {
+	if err := w.FlushError(); err != nil {
 		w.logger.Errorf("could not flush to stream: %s", err.Error())
 	}
 }
 
 func (w *responseWriter) StreamCreator() StreamCreator {
 	return w.conn
+}
+
+func (w *responseWriter) SetReadDeadline(deadline time.Time) error {
+	return w.str.SetReadDeadline(deadline)
+}
+
+func (w *responseWriter) SetWriteDeadline(deadline time.Time) error {
+	return w.str.SetWriteDeadline(deadline)
 }
 
 // copied from http2/http2.go

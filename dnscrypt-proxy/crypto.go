@@ -5,7 +5,6 @@ import (
 	crypto_rand "crypto/rand"
 	"crypto/sha512"
 	"errors"
-	"math/rand"
 
 	"github.com/jedisct1/dlog"
 	"github.com/jedisct1/xsecretbox"
@@ -79,7 +78,9 @@ func (proxy *Proxy) Encrypt(
 	proto string,
 ) (sharedKey *[32]byte, encrypted []byte, clientNonce []byte, err error) {
 	nonce, clientNonce := make([]byte, NonceSize), make([]byte, HalfNonceSize)
-	crypto_rand.Read(clientNonce)
+	if _, err := crypto_rand.Read(clientNonce); err != nil {
+		return nil, nil, nil, err
+	}
 	copy(nonce, clientNonce)
 	var publicKey *[PublicKeySize]byte
 	if proxy.ephemeralKeys {
@@ -102,7 +103,9 @@ func (proxy *Proxy) Encrypt(
 		minQuestionSize = Max(proxy.questionSizeEstimator.MinQuestionSize(), minQuestionSize)
 	} else {
 		var xpad [1]byte
-		rand.Read(xpad[:])
+		if _, err := crypto_rand.Read(xpad[:]); err != nil {
+			return nil, nil, nil, err
+		}
 		minQuestionSize += int(xpad[0])
 	}
 	paddedLength := Min(MaxDNSUDPPacketSize, (Max(minQuestionSize, QueryOverhead)+1+63) & ^63)

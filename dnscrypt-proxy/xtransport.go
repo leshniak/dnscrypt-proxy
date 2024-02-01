@@ -60,9 +60,11 @@ type XTransport struct {
 	timeout                  time.Duration
 	cachedIPs                CachedIPs
 	altSupport               AltSupport
+	internalResolvers        []string
 	bootstrapResolvers       []string
 	mainProto                string
 	ignoreSystemDNS          bool
+	internalResolverReady    bool
 	useIPv4                  bool
 	useIPv6                  bool
 	http3                    bool
@@ -71,6 +73,7 @@ type XTransport struct {
 	proxyDialer              *netproxy.Dialer
 	httpProxyFunction        func(*http.Request) (*url.URL, error)
 	tlsClientCreds           DOHClientCreds
+	keyLogWriter             io.Writer
 }
 
 func NewXTransport() *XTransport {
@@ -89,6 +92,7 @@ func NewXTransport() *XTransport {
 		useIPv6:                  false,
 		tlsDisableSessionTickets: false,
 		tlsCipherSuite:           nil,
+		keyLogWriter:             nil,
 	}
 	return &xTransport
 }
@@ -132,7 +136,7 @@ func (xTransport *XTransport) loadCachedIP(host string) (ip net.IP, expired bool
 func (xTransport *XTransport) rebuildTransport() {
 	dlog.Debug("Rebuilding transport")
 	if xTransport.transport != nil {
-		(*xTransport.transport).CloseIdleConnections()
+		xTransport.transport.CloseIdleConnections()
 	}
 	timeout := xTransport.timeout
 	transport := &http.Transport{
@@ -175,6 +179,10 @@ func (xTransport *XTransport) rebuildTransport() {
 	tlsClientConfig := tls.Config{}
 	certPool, certPoolErr := x509.SystemCertPool()
 
+	if xTransport.keyLogWriter != nil {
+		tlsClientConfig.KeyLogWriter = xTransport.keyLogWriter
+	}
+
 	if clientCreds.rootCA != "" {
 		if certPool == nil {
 			dlog.Fatalf("Additional CAs not supported on this platform: %v", certPoolErr)
@@ -188,7 +196,7 @@ func (xTransport *XTransport) rebuildTransport() {
 
 	if certPool != nil {
 		// Some operating systems don't include Let's Encrypt ISRG Root X1 certificate yet
-		var letsEncryptX1Cert = []byte(`-----BEGIN CERTIFICATE-----
+		letsEncryptX1Cert := []byte(`-----BEGIN CERTIFICATE-----
  MIIFazCCA1OgAwIBAgIRAIIQz7DSQONZRGPgu2OCiwAwDQYJKoZIhvcNAQELBQAwTzELMAkGA1UEBhMCVVMxKTAnBgNVBAoTIEludGVybmV0IFNlY3VyaXR5IFJlc2VhcmNoIEdyb3VwMRUwEwYDVQQDEwxJU1JHIFJvb3QgWDEwHhcNMTUwNjA0MTEwNDM4WhcNMzUwNjA0MTEwNDM4WjBPMQswCQYDVQQGEwJVUzEpMCcGA1UEChMgSW50ZXJuZXQgU2VjdXJpdHkgUmVzZWFyY2ggR3JvdXAxFTATBgNVBAMTDElTUkcgUm9vdCBYMTCCAiIwDQYJKoZIhvcNAQEBBQADggIPADCCAgoCggIBAK3oJHP0FDfzm54rVygch77ct984kIxuPOZXoHj3dcKi/vVqbvYATyjb3miGbESTtrFj/RQSa78f0uoxmyF+0TM8ukj13Xnfs7j/EvEhmkvBioZxaUpmZmyPfjxwv60pIgbz5MDmgK7iS4+3mX6UA5/TR5d8mUgjU+g4rk8Kb4Mu0UlXjIB0ttov0DiNewNwIRt18jA8+o+u3dpjq+sWT8KOEUt+zwvo/7V3LvSye0rgTBIlDHCNAymg4VMk7BPZ7hm/ELNKjD+Jo2FR3qyHB5T0Y3HsLuJvW5iB4YlcNHlsdu87kGJ55tukmi8mxdAQ4Q7e2RCOFvu396j3x+UCB5iPNgiV5+I3lg02dZ77DnKxHZu8A/lJBdiB3QW0KtZB6awBdpUKD9jf1b0SHzUvKBds0pjBqAlkd25HN7rOrFleaJ1/ctaJxQZBKT5ZPt0m9STJEadao0xAH0ahmbWnOlFuhjuefXKnEgV4We0+UXgVCwOPjdAvBbI+e0ocS3MFEvzG6uBQE3xDk3SzynTnjh8BCNAw1FtxNrQHusEwMFxIt4I7mKZ9YIqioymCzLq9gwQbooMDQaHWBfEbwrbwqHyGO0aoSCqI3Haadr8faqU9GY/rOPNk3sgrDQoo//fb4hVC1CLQJ13hef4Y53CIrU7m2Ys6xt0nUW7/vGT1M0NPAgMBAAGjQjBAMA4GA1UdDwEB/wQEAwIBBjAPBgNVHRMBAf8EBTADAQH/MB0GA1UdDgQWBBR5tFnme7bl5AFzgAiIyBpY9umbbjANBgkqhkiG9w0BAQsFAAOCAgEAVR9YqbyyqFDQDLHYGmkgJykIrGF1XIpu+ILlaS/V9lZLubhzEFnTIZd+50xx+7LSYK05qAvqFyFWhfFQDlnrzuBZ6brJFe+GnY+EgPbk6ZGQ3BebYhtF8GaV0nxvwuo77x/Py9auJ/GpsMiu/X1+mvoiBOv/2X/qkSsisRcOj/KKNFtY2PwByVS5uCbMiogziUwthDyC3+6WVwW6LLv3xLfHTjuCvjHIInNzktHCgKQ5ORAzI4JMPJ+GslWYHb4phowim57iaztXOoJwTdwJx4nLCgdNbOhdjsnvzqvHu7UrTkXWStAmzOVyyghqpZXjFaH3pO3JLF+l+/+sKAIuvtd7u+Nxe5AW0wdeRlN8NwdCjNPElpzVmbUq4JUagEiuTDkHzsxHpFKVK7q4+63SM1N95R1NbdWhscdCb+ZAJzVcoyi3B43njTOQ5yOf+1CceWxG1bQVs5ZufpsMljq4Ui0/1lvh+wjChP4kqKOJ2qxq4RgqsahDYVvTH9w7jXbyLeiNdd8XM2w9U/t7y0Ff/9yi0GE44Za4rF2LN9d11TPAmRGunUHBcnWEvgJBQl9nJEiU0Zsnvgc/ubhPgXRR4Xq37Z0j4r7g1SgEEzwxA57demyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
  -----END CERTIFICATE-----`)
 		certPool.AppendCertsFromPEM(letsEncryptX1Cert)
@@ -214,7 +222,32 @@ func (xTransport *XTransport) rebuildTransport() {
 			tlsClientConfig.ClientSessionCache = tls.NewLRUClientSessionCache(10)
 		}
 		if xTransport.tlsCipherSuite != nil {
+			tlsClientConfig.PreferServerCipherSuites = false
 			tlsClientConfig.CipherSuites = xTransport.tlsCipherSuite
+
+			// Go doesn't allow changing the cipher suite with TLS 1.3
+			// So, check if the requested set of ciphers matches the TLS 1.3 suite.
+			// If it doesn't, downgrade to TLS 1.2
+			compatibleSuitesCount := 0
+			for _, suite := range tls.CipherSuites() {
+				if suite.Insecure {
+					continue
+				}
+				for _, supportedVersion := range suite.SupportedVersions {
+					if supportedVersion != tls.VersionTLS13 {
+						for _, expectedSuiteID := range xTransport.tlsCipherSuite {
+							if expectedSuiteID == suite.ID {
+								compatibleSuitesCount += 1
+								break
+							}
+						}
+					}
+				}
+			}
+			if compatibleSuitesCount != len(tls.CipherSuites()) {
+				dlog.Notice("Explicit cipher suite configured - downgrading to TLS 1.2")
+				tlsClientConfig.MaxVersion = tls.VersionTLS12
+			}
 		}
 	}
 	transport.TLSClientConfig = &tlsClientConfig
@@ -224,31 +257,42 @@ func (xTransport *XTransport) rebuildTransport() {
 	}
 	xTransport.transport = transport
 	if xTransport.http3 {
-		h3Transport := &http3.RoundTripper{DisableCompression: true, TLSClientConfig: &tlsClientConfig, Dial: func(ctx context.Context, addrStr string, tlsCfg *tls.Config, cfg *quic.Config) (quic.EarlyConnection, error) {
+		dial := func(ctx context.Context, addrStr string, tlsCfg *tls.Config, cfg *quic.Config) (quic.EarlyConnection, error) {
 			dlog.Debugf("Dialing for H3: [%v]", addrStr)
 			host, port := ExtractHostAndPort(addrStr, stamps.DefaultPort)
 			ipOnly := host
 			cachedIP, _ := xTransport.loadCachedIP(host)
+			network := "udp4"
 			if cachedIP != nil {
 				if ipv4 := cachedIP.To4(); ipv4 != nil {
 					ipOnly = ipv4.String()
 				} else {
 					ipOnly = "[" + cachedIP.String() + "]"
+					network = "udp6"
 				}
 			} else {
-				dlog.Debugf("[%s] IP address was not cached in H3 DialContext", host)
+				dlog.Debugf("[%s] IP address was not cached in H3 context", host)
+				if xTransport.useIPv6 {
+					if xTransport.useIPv4 {
+						network = "udp"
+					} else {
+						network = "udp6"
+					}
+				}
 			}
 			addrStr = ipOnly + ":" + strconv.Itoa(port)
-			udpAddr, err := net.ResolveUDPAddr("udp", addrStr)
+			udpAddr, err := net.ResolveUDPAddr(network, addrStr)
 			if err != nil {
 				return nil, err
 			}
-			udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+			udpConn, err := net.ListenUDP(network, nil)
 			if err != nil {
 				return nil, err
 			}
-			return quic.DialEarlyContext(ctx, udpConn, udpAddr, host, tlsCfg, cfg)
-		}}
+			tlsCfg.ServerName = host
+			return quic.DialEarly(ctx, udpConn, udpAddr, tlsCfg, cfg)
+		}
+		h3Transport := &http3.RoundTripper{DisableCompression: true, TLSClientConfig: &tlsClientConfig, Dial: dial}
 		xTransport.h3Transport = h3Transport
 	}
 }
@@ -333,16 +377,17 @@ func (xTransport *XTransport) resolveUsingResolvers(
 	proto, host string,
 	resolvers []string,
 ) (ip net.IP, ttl time.Duration, err error) {
+	err = errors.New("Empty resolvers")
 	for i, resolver := range resolvers {
 		ip, ttl, err = xTransport.resolveUsingResolver(proto, host, resolver)
 		if err == nil {
 			if i > 0 {
-				dlog.Infof("Resolution succeeded with bootstrap resolver %s[%s]", proto, resolver)
+				dlog.Infof("Resolution succeeded with resolver %s[%s]", proto, resolver)
 				resolvers[0], resolvers[i] = resolvers[i], resolvers[0]
 			}
 			break
 		}
-		dlog.Infof("Unable to resolve [%s] using bootstrap resolver %s[%s]: %v", host, proto, resolver, err)
+		dlog.Infof("Unable to resolve [%s] using resolver [%s] (%s): %v", host, resolver, proto, err)
 	}
 	return
 }
@@ -362,23 +407,37 @@ func (xTransport *XTransport) resolveAndUpdateCache(host string) error {
 	var foundIP net.IP
 	var ttl time.Duration
 	var err error
-	if !xTransport.ignoreSystemDNS {
-		foundIP, ttl, err = xTransport.resolveUsingSystem(host)
+	protos := []string{"udp", "tcp"}
+	if xTransport.mainProto == "tcp" {
+		protos = []string{"tcp", "udp"}
 	}
-	if xTransport.ignoreSystemDNS || err != nil {
-		protos := []string{"udp", "tcp"}
-		if xTransport.mainProto == "tcp" {
-			protos = []string{"tcp", "udp"}
+	if xTransport.ignoreSystemDNS {
+		if xTransport.internalResolverReady {
+			for _, proto := range protos {
+				foundIP, ttl, err = xTransport.resolveUsingResolvers(proto, host, xTransport.internalResolvers)
+				if err == nil {
+					break
+				}
+			}
+		} else {
+			err = errors.New("Service is not usable yet")
+			dlog.Notice(err)
 		}
+	} else {
+		foundIP, ttl, err = xTransport.resolveUsingSystem(host)
+		if err != nil {
+			err = errors.New("System DNS is not usable yet")
+			dlog.Notice(err)
+		}
+	}
+	if err != nil {
 		for _, proto := range protos {
 			if err != nil {
 				dlog.Noticef(
-					"System DNS configuration not usable yet, exceptionally resolving [%s] using bootstrap resolvers over %s",
+					"Resolving server host [%s] using bootstrap resolvers over %s",
 					host,
 					proto,
 				)
-			} else {
-				dlog.Debugf("Resolving [%s] using bootstrap resolvers over %s", host, proto)
 			}
 			foundIP, ttl, err = xTransport.resolveUsingResolvers(proto, host, xTransport.bootstrapResolvers)
 			if err == nil {
@@ -400,6 +459,15 @@ func (xTransport *XTransport) resolveAndUpdateCache(host string) error {
 			ttl = ExpiredCachedIPGraceTTL
 		} else {
 			return err
+		}
+	}
+	if foundIP == nil {
+		if !xTransport.useIPv4 && xTransport.useIPv6 {
+			dlog.Warnf("no IPv6 address found for [%s]", host)
+		} else if xTransport.useIPv4 && !xTransport.useIPv6 {
+			dlog.Warnf("no IPv4 address found for [%s]", host)
+		} else {
+			dlog.Errorf("no IP address found for [%s]", host)
 		}
 	}
 	xTransport.saveCachedIP(host, foundIP, ttl)
@@ -482,8 +550,8 @@ func (xTransport *XTransport) Fetch(
 			err = errors.New(resp.Status)
 		}
 	} else {
-		dlog.Debugf("HTTP client error: [%v] - closing idle H3 connections", err)
-		(*xTransport.transport).CloseIdleConnections()
+		dlog.Debugf("HTTP client error: [%v] - closing idle connections", err)
+		xTransport.transport.CloseIdleConnections()
 	}
 	statusCode := 503
 	if resp != nil {

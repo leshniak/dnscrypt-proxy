@@ -100,8 +100,10 @@ func (plugin *PluginBlockIPv6) Eval(pluginsState *PluginsState, msg *dns.Msg) er
 	soa.Minttl = 2400
 	soa.Expire = 604800
 	soa.Retry = 300
-	soa.Hdr = dns.RR_Header{Name: parentZone, Rrtype: dns.TypeSOA,
-		Class: dns.ClassINET, Ttl: 60}
+	soa.Hdr = dns.RR_Header{
+		Name: parentZone, Rrtype: dns.TypeSOA,
+		Class: dns.ClassINET, Ttl: 60,
+	}
 	synth.Ns = []dns.RR{soa}
 	pluginsState.synthResponse = synth
 	pluginsState.action = PluginsActionSynth
