@@ -113,8 +113,11 @@ func (proxy *Proxy) InitPluginsGlobals() error {
 	if len(proxy.blockNameFile) != 0 {
 		*queryPlugins = append(*queryPlugins, Plugin(new(PluginBlockName)))
 	}
-	if proxy.pluginBlockIPv6 || proxy.pluginBlockIPv6DualStack {
+	if proxy.pluginBlockIPv6 {
 		*queryPlugins = append(*queryPlugins, Plugin(new(PluginBlockIPv6)))
+	}
+	if proxy.pluginBlockType65 {
+		*queryPlugins = append(*queryPlugins, Plugin(new(PluginBlockType65)))
 	}
 	if len(proxy.cloakFile) != 0 {
 		*queryPlugins = append(*queryPlugins, Plugin(new(PluginCloak)))

@@ -9,11 +9,11 @@ import (
 type PluginBlockType65 struct{}
 
 func (plugin *PluginBlockType65) Name() string {
-	return "block_ipv6"
+	return "block_type65"
 }
 
 func (plugin *PluginBlockType65) Description() string {
-	return "Immediately return a synthetic response to AAAA queries."
+	return "Immediately return a synthetic response to HTTPS (Type65) queries."
 }
 
 func (plugin *PluginBlockType65) Init(proxy *Proxy) error {
@@ -30,7 +30,7 @@ func (plugin *PluginBlockType65) Reload() error {
 
 func (plugin *PluginBlockType65) Eval(pluginsState *PluginsState, msg *dns.Msg) error {
 	question := msg.Question[0]
-	if question.Qclass != dns.ClassINET || question.Qtype != dns.TypeAAAA {
+	if question.Qclass != dns.ClassINET || question.Qtype != dns.TypeHTTPS {
 		return nil
 	}
 	synth := EmptyResponseFromMessage(msg)
@@ -39,8 +39,8 @@ func (plugin *PluginBlockType65) Eval(pluginsState *PluginsState, msg *dns.Msg) 
 		Name: question.Name, Rrtype: dns.TypeHINFO,
 		Class: dns.ClassINET, Ttl: 86400,
 	}
-	hinfo.Cpu = "AAAA queries have been locally blocked by dnscrypt-proxy"
-	hinfo.Os = "Set block_ipv6 to false to disable that feature"
+	hinfo.Cpu = "HTTPS (Type65) queries have been locally blocked by dnscrypt-proxy"
+	hinfo.Os = "Set block_type65 to false to disable that feature"
 	synth.Answer = []dns.RR{hinfo}
 	qName := question.Name
 	i := strings.Index(qName, ".")

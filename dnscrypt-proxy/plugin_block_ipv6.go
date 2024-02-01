@@ -9,8 +9,7 @@ import (
 )
 
 type PluginBlockIPv6 struct {
-	proxy          *Proxy
-	blockDualStack bool
+	proxy *Proxy
 }
 
 func (plugin *PluginBlockIPv6) Name() string {
@@ -23,7 +22,6 @@ func (plugin *PluginBlockIPv6) Description() string {
 
 func (plugin *PluginBlockIPv6) Init(proxy *Proxy) error {
 	plugin.proxy = proxy
-	plugin.blockDualStack = !proxy.pluginBlockIPv6 && proxy.pluginBlockIPv6DualStack
 	return nil
 }
 
@@ -40,7 +38,7 @@ func (plugin *PluginBlockIPv6) Eval(pluginsState *PluginsState, msg *dns.Msg) er
 	if question.Qclass != dns.ClassINET || question.Qtype != dns.TypeAAAA {
 		return nil
 	}
-	if plugin.blockDualStack {
+	if plugin.proxy.pluginBlockIPv6DualStackOnly {
 		msgA := msg.Copy()
 		msgA.SetQuestion(question.Name, dns.TypeA)
 		msgAPacket, err := msgA.Pack()
@@ -48,7 +46,7 @@ func (plugin *PluginBlockIPv6) Eval(pluginsState *PluginsState, msg *dns.Msg) er
 			return err
 		}
 		if !plugin.proxy.clientsCountInc() {
-			return errors.New("Too many concurrent connections to handle block_ipv6_dual_stack subqueries")
+			return errors.New("Too many concurrent connections to handle A subqueries")
 		}
 		respAPacket := plugin.proxy.processIncomingQuery(
 			"trampoline",
@@ -83,8 +81,8 @@ func (plugin *PluginBlockIPv6) Eval(pluginsState *PluginsState, msg *dns.Msg) er
 	hinfo := new(dns.HINFO)
 	hinfo.Hdr = dns.RR_Header{Name: question.Name, Rrtype: dns.TypeHINFO,
 		Class: dns.ClassINET, Ttl: 86400}
-	hinfo.Cpu = "This AAAA query has been locally blocked by dnscrypt-proxy"
-	hinfo.Os = "Set block_ipv6 and block_ipv6_dual_stack to false to disable this feature"
+	hinfo.Cpu = "AAAA queries have been locally blocked by dnscrypt-proxy"
+	hinfo.Os = "Set block_ipv6 to false to disable this feature"
 	synth.Answer = []dns.RR{hinfo}
 	qName := question.Name
 	i := strings.Index(qName, ".")

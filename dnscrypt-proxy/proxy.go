@@ -89,7 +89,8 @@ type Proxy struct {
 	cloakedPTR                    bool
 	cache                         bool
 	pluginBlockIPv6               bool
-	pluginBlockIPv6DualStack      bool
+	pluginBlockIPv6DualStackOnly  bool
+	pluginBlockType65             bool
 	ephemeralKeys                 bool
 	pluginBlockUnqualified        bool
 	showCerts                     bool

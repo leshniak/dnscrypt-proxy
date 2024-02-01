@@ -348,10 +348,15 @@ block_ipv6 = false
 
 
 ## Block AAAA query if A record is available for the same domain name.
-## Remember to set block_ipv6 (a general IPv6 filter) to false.
+## Remember to enable block_ipv6 (a general IPv6 filter).
 ## This may increase the latency.
 
-block_ipv6_dual_stack = false
+block_ipv6_ds_only = false
+
+
+## Immediately respond to Type65-related queries with an empty response
+
+block_type65 = false
 
 
 ## Immediately respond to A and AAAA queries for host names without a domain name
