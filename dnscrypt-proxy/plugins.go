@@ -116,8 +116,8 @@ func (proxy *Proxy) InitPluginsGlobals() error {
 	if proxy.pluginBlockIPv6 {
 		*queryPlugins = append(*queryPlugins, Plugin(new(PluginBlockIPv6)))
 	}
-	if proxy.pluginBlockType65 {
-		*queryPlugins = append(*queryPlugins, Plugin(new(PluginBlockType65)))
+	if proxy.pluginPreferIPv4 {
+		*queryPlugins = append(*queryPlugins, Plugin(new(PluginPreferIPv4)))
 	}
 	if len(proxy.cloakFile) != 0 {
 		*queryPlugins = append(*queryPlugins, Plugin(new(PluginCloak)))
@@ -148,6 +148,9 @@ func (proxy *Proxy) InitPluginsGlobals() error {
 	}
 	if len(proxy.blockIPFile) != 0 {
 		*responsePlugins = append(*responsePlugins, Plugin(new(PluginBlockIP)))
+	}
+	if proxy.pluginPreferIPv4 {
+		*responsePlugins = append(*responsePlugins, Plugin(new(PluginPreferIPv4Response)))
 	}
 	if len(proxy.dns64Resolvers) != 0 || len(proxy.dns64Prefixes) != 0 {
 		*responsePlugins = append(*responsePlugins, Plugin(new(PluginDNS64)))

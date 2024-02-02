@@ -1,27 +1,22 @@
 package main
 
 import (
-	"errors"
 	"strings"
-	"time"
 
 	"github.com/miekg/dns"
 )
 
-type PluginBlockIPv6 struct {
-	proxy *Proxy
-}
+type PluginBlockIPv6 struct{}
 
 func (plugin *PluginBlockIPv6) Name() string {
 	return "block_ipv6"
 }
 
 func (plugin *PluginBlockIPv6) Description() string {
-	return "Return a synthetic response to AAAA queries immediately or if A record exists"
+	return "Immediately return a synthetic response to AAAA queries."
 }
 
 func (plugin *PluginBlockIPv6) Init(proxy *Proxy) error {
-	plugin.proxy = proxy
 	return nil
 }
 
@@ -38,51 +33,14 @@ func (plugin *PluginBlockIPv6) Eval(pluginsState *PluginsState, msg *dns.Msg) er
 	if question.Qclass != dns.ClassINET || question.Qtype != dns.TypeAAAA {
 		return nil
 	}
-	if plugin.proxy.pluginBlockIPv6DualStackOnly {
-		msgA := msg.Copy()
-		msgA.SetQuestion(question.Name, dns.TypeA)
-		msgAPacket, err := msgA.Pack()
-		if err != nil {
-			return err
-		}
-		if !plugin.proxy.clientsCountInc() {
-			return errors.New("Too many concurrent connections to handle A subqueries")
-		}
-		respAPacket := plugin.proxy.processIncomingQuery(
-			"trampoline",
-			plugin.proxy.mainProto,
-			msgAPacket,
-			nil,
-			nil,
-			time.Now(),
-			false,
-		)
-		plugin.proxy.clientsCountDec()
-		respA := dns.Msg{}
-		if err := respA.Unpack(respAPacket); err != nil {
-			return err
-		}
-		if respA.Rcode != dns.RcodeSuccess {
-			return nil
-		}
-		hasAAnswer := false
-		for _, answer := range respA.Answer {
-			header := answer.Header()
-			if header.Rrtype == dns.TypeA {
-				hasAAnswer = true
-				break
-			}
-		}
-		if !hasAAnswer {
-			return nil
-		}
-	}
 	synth := EmptyResponseFromMessage(msg)
 	hinfo := new(dns.HINFO)
-	hinfo.Hdr = dns.RR_Header{Name: question.Name, Rrtype: dns.TypeHINFO,
-		Class: dns.ClassINET, Ttl: 86400}
+	hinfo.Hdr = dns.RR_Header{
+		Name: question.Name, Rrtype: dns.TypeHINFO,
+		Class: dns.ClassINET, Ttl: 86400,
+	}
 	hinfo.Cpu = "AAAA queries have been locally blocked by dnscrypt-proxy"
-	hinfo.Os = "Set block_ipv6 to false to disable this feature"
+	hinfo.Os = "Set block_ipv6 to false to disable that feature"
 	synth.Answer = []dns.RR{hinfo}
 	qName := question.Name
 	i := strings.Index(qName, ".")
