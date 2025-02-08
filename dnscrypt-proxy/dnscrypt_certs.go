@@ -96,10 +96,11 @@ func FetchCurrentDNSCryptCert(
 		switch esVersion := binary.BigEndian.Uint16(binCert[4:6]); esVersion {
 		case 0x0001:
 			cryptoConstruction = XSalsa20Poly1305
+			dlog.Noticef("[%v] should upgrade to XChaCha20 for encryption", *serverName)
 		case 0x0002:
 			cryptoConstruction = XChacha20Poly1305
 		default:
-			dlog.Noticef("[%v] Unsupported crypto construction", *serverName)
+			dlog.Debugf("[%v] uses an unsupported encryption system", *serverName)
 			continue
 		}
 		signature := binCert[8:72]
@@ -183,7 +184,7 @@ func FetchCurrentDNSCryptCert(
 		certCountStr = " - additional certificate"
 	}
 	if certInfo.CryptoConstruction == UndefinedConstruction {
-		return certInfo, 0, fragmentsBlocked, errors.New("No useable certificate found")
+		return certInfo, 0, fragmentsBlocked, errors.New("No usable certificate found")
 	}
 	return certInfo, int(rtt.Nanoseconds() / 1000000), fragmentsBlocked, nil
 }

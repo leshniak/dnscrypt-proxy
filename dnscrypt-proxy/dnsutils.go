@@ -16,10 +16,8 @@ func EmptyResponseFromMessage(srcMsg *dns.Msg) *dns.Msg {
 	dstMsg := dns.Msg{MsgHdr: srcMsg.MsgHdr, Compress: true}
 	dstMsg.Question = srcMsg.Question
 	dstMsg.Response = true
-	if srcMsg.RecursionDesired {
-		dstMsg.RecursionAvailable = true
-	}
-	dstMsg.RecursionDesired = false
+	dstMsg.RecursionAvailable = true
+	dstMsg.RecursionDesired = srcMsg.RecursionDesired
 	dstMsg.CheckingDisabled = false
 	dstMsg.AuthenticatedData = false
 	if edns0 := srcMsg.IsEdns0(); edns0 != nil {
@@ -273,8 +271,6 @@ func removeEDNS0Options(msg *dns.Msg) bool {
 	edns0.Option = []dns.EDNS0{}
 	return true
 }
-
-func isDigit(b byte) bool { return b >= '0' && b <= '9' }
 
 func dddToByte(s []byte) byte {
 	return byte((s[0]-'0')*100 + (s[1]-'0')*10 + (s[2] - '0'))
