@@ -3,9 +3,6 @@
 [![Financial Contributors on Open Collective](https://opencollective.com/dnscrypt/all/badge.svg?label=financial+contributors)](https://opencollective.com/dnscrypt)
 [![DNSCrypt-Proxy Release](https://img.shields.io/github/release/dnscrypt/dnscrypt-proxy.svg?label=Latest%20Release&style=popout)](https://github.com/dnscrypt/dnscrypt-proxy/releases/latest)
 [![Build Status](https://github.com/DNSCrypt/dnscrypt-proxy/actions/workflows/releases.yml/badge.svg)](https://github.com/DNSCrypt/dnscrypt-proxy/actions/workflows/releases.yml)
-![CodeQL scan](https://github.com/DNSCrypt/dnscrypt-proxy/workflows/CodeQL%20scan/badge.svg)
-![ShiftLeft Scan](https://github.com/DNSCrypt/dnscrypt-proxy/workflows/ShiftLeft%20Scan/badge.svg)
-[![#dnscrypt-proxy:matrix.org](https://img.shields.io/matrix/dnscrypt-proxy:matrix.org.svg?label=DNSCrypt-Proxy%20Matrix%20Chat&server_fqdn=matrix.org&style=popout)](https://matrix.to/#/#dnscrypt-proxy:matrix.org)
 
 ## Overview
 
@@ -31,6 +28,7 @@ Available as source code and pre-built binaries for most operating systems and a
 * Filtering: block ads, malware, and other unwanted content. Compatible with all DNS services
 * Time-based filtering, with a flexible weekly schedule
 * Transparent redirection of specific domains to specific resolvers
+* Optional hot-reloading of configuration files (disabled by default from v2.1.10)
 * DNS caching, to reduce latency and improve privacy
 * Local IPv6 blocking to reduce latency on IPv4-only networks
 * Load balancing: pick a set of resolvers, dnscrypt-proxy will automatically measure and keep track of their speed, and balance the traffic across the fastest available ones.

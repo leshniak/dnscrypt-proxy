@@ -34,14 +34,16 @@ const (
 	DefaultBootstrapResolver = "9.9.9.9:53"
 	DefaultKeepAlive         = 5 * time.Second
 	DefaultTimeout           = 30 * time.Second
-	SystemResolverIPTTL      = 24 * time.Hour
-	MinResolverIPTTL         = 12 * time.Hour
+	SystemResolverIPTTL      = 12 * time.Hour
+	MinResolverIPTTL         = 4 * time.Hour
+	ResolverIPTTLMaxJitter   = 15 * time.Minute
 	ExpiredCachedIPGraceTTL  = 15 * time.Minute
 )
 
 type CachedIPItem struct {
-	ip         net.IP
-	expiration *time.Time
+	ip            net.IP
+	expiration    *time.Time
+	updatingUntil *time.Time
 }
 
 type CachedIPs struct {
@@ -56,7 +58,7 @@ type AltSupport struct {
 
 type XTransport struct {
 	transport                *http.Transport
-	h3Transport              *http3.RoundTripper
+	h3Transport              *http3.Transport
 	keepAlive                time.Duration
 	timeout                  time.Duration
 	cachedIPs                CachedIPs
@@ -69,6 +71,7 @@ type XTransport struct {
 	useIPv4                  bool
 	useIPv6                  bool
 	http3                    bool
+	http3Probe               bool
 	tlsDisableSessionTickets bool
 	tlsCipherSuite           []uint16
 	proxyDialer              *netproxy.Dialer
@@ -91,6 +94,7 @@ func NewXTransport() *XTransport {
 		ignoreSystemDNS:          true,
 		useIPv4:                  true,
 		useIPv6:                  false,
+		http3Probe:               false,
 		tlsDisableSessionTickets: false,
 		tlsCipherSuite:           nil,
 		keyLogWriter:             nil,
@@ -105,31 +109,54 @@ func ParseIP(ipStr string) net.IP {
 // If ttl < 0, never expire
 // Otherwise, ttl is set to max(ttl, MinResolverIPTTL)
 func (xTransport *XTransport) saveCachedIP(host string, ip net.IP, ttl time.Duration) {
-	item := &CachedIPItem{ip: ip, expiration: nil}
+	item := &CachedIPItem{ip: ip, expiration: nil, updatingUntil: nil}
 	if ttl >= 0 {
 		if ttl < MinResolverIPTTL {
 			ttl = MinResolverIPTTL
 		}
+		ttl += time.Duration(rand.Int63n(int64(ResolverIPTTLMaxJitter)))
 		expiration := time.Now().Add(ttl)
 		item.expiration = &expiration
 	}
 	xTransport.cachedIPs.Lock()
 	xTransport.cachedIPs.cache[host] = item
 	xTransport.cachedIPs.Unlock()
+	dlog.Debugf("[%s] IP address [%s] stored to the cache, valid for %v", host, ip, ttl)
 }
 
-func (xTransport *XTransport) loadCachedIP(host string) (ip net.IP, expired bool) {
-	ip, expired = nil, false
+// Mark an entry as being updated
+func (xTransport *XTransport) markUpdatingCachedIP(host string) {
+	xTransport.cachedIPs.Lock()
+	item, ok := xTransport.cachedIPs.cache[host]
+	if ok {
+		now := time.Now()
+		until := now.Add(xTransport.timeout)
+		item.updatingUntil = &until
+		xTransport.cachedIPs.cache[host] = item
+		dlog.Debugf("[%s] IP addresss marked as updating", host)
+	}
+	xTransport.cachedIPs.Unlock()
+}
+
+func (xTransport *XTransport) loadCachedIP(host string) (ip net.IP, expired bool, updating bool) {
+	ip, expired, updating = nil, false, false
 	xTransport.cachedIPs.RLock()
 	item, ok := xTransport.cachedIPs.cache[host]
 	xTransport.cachedIPs.RUnlock()
 	if !ok {
+		dlog.Debugf("[%s] IP address not found in the cache", host)
 		return
 	}
 	ip = item.ip
 	expiration := item.expiration
 	if expiration != nil && time.Until(*expiration) < 0 {
 		expired = true
+		if item.updatingUntil != nil && time.Until(*item.updatingUntil) > 0 {
+			updating = true
+			dlog.Debugf("[%s] IP address is being updated", host)
+		} else {
+			dlog.Debugf("[%s] IP address expired, not being updated yet", host)
+		}
 	}
 	return
 }
@@ -153,7 +180,7 @@ func (xTransport *XTransport) rebuildTransport() {
 			ipOnly := host
 			// resolveAndUpdateCache() is always called in `Fetch()` before the `Dial()`
 			// method is used, so that a cached entry must be present at this point.
-			cachedIP, _ := xTransport.loadCachedIP(host)
+			cachedIP, _, _ := xTransport.loadCachedIP(host)
 			if cachedIP != nil {
 				if ipv4 := cachedIP.To4(); ipv4 != nil {
 					ipOnly = ipv4.String()
@@ -217,12 +244,13 @@ func (xTransport *XTransport) rebuildTransport() {
 		tlsClientConfig.Certificates = []tls.Certificate{cert}
 	}
 
-	if xTransport.tlsDisableSessionTickets || xTransport.tlsCipherSuite != nil {
+	overrideCipherSuite := len(xTransport.tlsCipherSuite) > 0
+	if xTransport.tlsDisableSessionTickets || overrideCipherSuite {
 		tlsClientConfig.SessionTicketsDisabled = xTransport.tlsDisableSessionTickets
 		if !xTransport.tlsDisableSessionTickets {
 			tlsClientConfig.ClientSessionCache = tls.NewLRUClientSessionCache(10)
 		}
-		if xTransport.tlsCipherSuite != nil {
+		if overrideCipherSuite {
 			tlsClientConfig.PreferServerCipherSuites = false
 			tlsClientConfig.CipherSuites = xTransport.tlsCipherSuite
 
@@ -235,7 +263,7 @@ func (xTransport *XTransport) rebuildTransport() {
 					continue
 				}
 				for _, supportedVersion := range suite.SupportedVersions {
-					if supportedVersion != tls.VersionTLS13 {
+					if supportedVersion == tls.VersionTLS12 {
 						for _, expectedSuiteID := range xTransport.tlsCipherSuite {
 							if expectedSuiteID == suite.ID {
 								compatibleSuitesCount += 1
@@ -262,7 +290,7 @@ func (xTransport *XTransport) rebuildTransport() {
 			dlog.Debugf("Dialing for H3: [%v]", addrStr)
 			host, port := ExtractHostAndPort(addrStr, stamps.DefaultPort)
 			ipOnly := host
-			cachedIP, _ := xTransport.loadCachedIP(host)
+			cachedIP, _, _ := xTransport.loadCachedIP(host)
 			network := "udp4"
 			if cachedIP != nil {
 				if ipv4 := cachedIP.To4(); ipv4 != nil {
@@ -293,7 +321,7 @@ func (xTransport *XTransport) rebuildTransport() {
 			tlsCfg.ServerName = host
 			return quic.DialEarly(ctx, udpConn, udpAddr, tlsCfg, cfg)
 		}
-		h3Transport := &http3.RoundTripper{DisableCompression: true, TLSClientConfig: &tlsClientConfig, Dial: dial}
+		h3Transport := &http3.Transport{DisableCompression: true, TLSClientConfig: &tlsClientConfig, Dial: dial}
 		xTransport.h3Transport = h3Transport
 	}
 }
@@ -401,10 +429,12 @@ func (xTransport *XTransport) resolveAndUpdateCache(host string) error {
 	if ParseIP(host) != nil {
 		return nil
 	}
-	cachedIP, expired := xTransport.loadCachedIP(host)
-	if cachedIP != nil && !expired {
+	cachedIP, expired, updating := xTransport.loadCachedIP(host)
+	if cachedIP != nil && (!expired || updating) {
 		return nil
 	}
+	xTransport.markUpdatingCachedIP(host)
+
 	var foundIP net.IP
 	var ttl time.Duration
 	var err error
@@ -472,7 +502,6 @@ func (xTransport *XTransport) resolveAndUpdateCache(host string) error {
 		}
 	}
 	xTransport.saveCachedIP(host, foundIP, ttl)
-	dlog.Debugf("[%s] IP address [%s] added to the cache, valid for %v", host, foundIP, ttl)
 	return nil
 }
 
@@ -494,15 +523,24 @@ func (xTransport *XTransport) Fetch(
 	}
 	host, port := ExtractHostAndPort(url.Host, 443)
 	hasAltSupport := false
+
 	if xTransport.h3Transport != nil {
-		xTransport.altSupport.RLock()
-		var altPort uint16
-		altPort, hasAltSupport = xTransport.altSupport.cache[url.Host]
-		xTransport.altSupport.RUnlock()
-		if hasAltSupport {
-			if int(altPort) == port {
-				client.Transport = xTransport.h3Transport
-				dlog.Debugf("Using HTTP/3 transport for [%s]", url.Host)
+		if xTransport.http3Probe {
+			// Always try HTTP/3 first when http3_probe is enabled,
+			// without checking for Alt-Svc
+			client.Transport = xTransport.h3Transport
+			dlog.Debugf("Probing HTTP/3 transport for [%s]", url.Host)
+		} else {
+			// Otherwise use traditional Alt-Svc detection
+			xTransport.altSupport.RLock()
+			var altPort uint16
+			altPort, hasAltSupport = xTransport.altSupport.cache[url.Host]
+			xTransport.altSupport.RUnlock()
+			if hasAltSupport && altPort > 0 { // altPort > 0 ensures we're not in the negative cache
+				if int(altPort) == port {
+					client.Transport = xTransport.h3Transport
+					dlog.Debugf("Using HTTP/3 transport for [%s]", url.Host)
+				}
 			}
 		}
 	}
@@ -548,6 +586,27 @@ func (xTransport *XTransport) Fetch(
 	start := time.Now()
 	resp, err := client.Do(req)
 	rtt := time.Since(start)
+
+	// Handle HTTP/3 error case - fallback to HTTP/2 when HTTP/3 fails
+	if err != nil && client.Transport == xTransport.h3Transport {
+		if xTransport.http3Probe {
+			dlog.Debugf("HTTP/3 probe failed for [%s]: [%s] - falling back to HTTP/2", url.Host, err)
+		} else {
+			dlog.Debugf("HTTP/3 connection failed for [%s]: [%s] - falling back to HTTP/2", url.Host, err)
+		}
+
+		// Add server to negative cache when HTTP/3 fails
+		xTransport.altSupport.Lock()
+		xTransport.altSupport.cache[url.Host] = 0 // 0 port means HTTP/3 failed and should not be tried again
+		xTransport.altSupport.Unlock()
+
+		// Retry with HTTP/2
+		client.Transport = xTransport.transport
+		start = time.Now()
+		resp, err = client.Do(req)
+		rtt = time.Since(start)
+	}
+
 	if err == nil {
 		if resp == nil {
 			err = errors.New("Webserver returned an error")
@@ -574,30 +633,45 @@ func (xTransport *XTransport) Fetch(
 		return nil, statusCode, nil, rtt, err
 	}
 	if xTransport.h3Transport != nil && !hasAltSupport {
-		if alt, found := resp.Header["Alt-Svc"]; found {
-			dlog.Debugf("Alt-Svc [%s]: [%s]", url.Host, alt)
-			altPort := uint16(port & 0xffff)
-			for i, xalt := range alt {
-				for j, v := range strings.Split(xalt, ";") {
-					if i >= 8 || j >= 16 {
-						break
-					}
-					v = strings.TrimSpace(v)
-					if strings.HasPrefix(v, "h3=\":") {
-						v = strings.TrimPrefix(v, "h3=\":")
-						v = strings.TrimSuffix(v, "\"")
-						if xAltPort, err := strconv.ParseUint(v, 10, 16); err == nil && xAltPort <= 65535 {
-							altPort = uint16(xAltPort)
-							dlog.Debugf("Using HTTP/3 for [%s]", url.Host)
+		// Check if there's entry in negative cache when using http3_probe
+		skipAltSvcParsing := false
+		if xTransport.http3Probe {
+			xTransport.altSupport.RLock()
+			altPort, inCache := xTransport.altSupport.cache[url.Host]
+			xTransport.altSupport.RUnlock()
+			// If server is in negative cache (altPort == 0), don't attempt to parse Alt-Svc header
+			if inCache && altPort == 0 {
+				dlog.Debugf("Skipping Alt-Svc parsing for [%s] - previously failed HTTP/3 probe", url.Host)
+				skipAltSvcParsing = true
+			}
+		}
+
+		if !skipAltSvcParsing {
+			if alt, found := resp.Header["Alt-Svc"]; found {
+				dlog.Debugf("Alt-Svc [%s]: [%s]", url.Host, alt)
+				altPort := uint16(port & 0xffff)
+				for i, xalt := range alt {
+					for j, v := range strings.Split(xalt, ";") {
+						if i >= 8 || j >= 16 {
 							break
+						}
+						v = strings.TrimSpace(v)
+						if strings.HasPrefix(v, "h3=\":") {
+							v = strings.TrimPrefix(v, "h3=\":")
+							v = strings.TrimSuffix(v, "\"")
+							if xAltPort, err := strconv.ParseUint(v, 10, 16); err == nil && xAltPort <= 65535 {
+								altPort = uint16(xAltPort)
+								dlog.Debugf("Using HTTP/3 for [%s]", url.Host)
+								break
+							}
 						}
 					}
 				}
+				xTransport.altSupport.Lock()
+				xTransport.altSupport.cache[url.Host] = altPort
+				dlog.Debugf("Caching altPort for [%v]", url.Host)
+				xTransport.altSupport.Unlock()
 			}
-			xTransport.altSupport.Lock()
-			xTransport.altSupport.cache[url.Host] = altPort
-			dlog.Debugf("Caching altPort for [%v]", url.Host)
-			xTransport.altSupport.Unlock()
 		}
 	}
 	tls := resp.TLS
