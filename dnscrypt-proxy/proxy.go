@@ -8,6 +8,7 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -105,18 +106,25 @@ type Proxy struct {
 	SourceDNSCrypt                bool
 	SourceDoH                     bool
 	SourceODoH                    bool
+	listenersMu                   sync.Mutex
 }
 
 func (proxy *Proxy) registerUDPListener(conn *net.UDPConn) {
+	proxy.listenersMu.Lock()
 	proxy.udpListeners = append(proxy.udpListeners, conn)
+	proxy.listenersMu.Unlock()
 }
 
 func (proxy *Proxy) registerTCPListener(listener *net.TCPListener) {
+	proxy.listenersMu.Lock()
 	proxy.tcpListeners = append(proxy.tcpListeners, listener)
+	proxy.listenersMu.Unlock()
 }
 
 func (proxy *Proxy) registerLocalDoHListener(listener *net.TCPListener) {
+	proxy.listenersMu.Lock()
 	proxy.localDoHListeners = append(proxy.localDoHListeners, listener)
+	proxy.listenersMu.Unlock()
 }
 
 func (proxy *Proxy) addDNSListener(listenAddrStr string) {
@@ -169,23 +177,29 @@ func (proxy *Proxy) addDNSListener(listenAddrStr string) {
 		}
 		defer listenerUDP.Close()
 		defer listenerTCP.Close()
+		FileDescriptorsMu.Lock()
 		FileDescriptors = append(FileDescriptors, fdUDP)
 		FileDescriptors = append(FileDescriptors, fdTCP)
+		FileDescriptorsMu.Unlock()
 		return
 	}
 
 	// child
+	FileDescriptorsMu.Lock()
 	listenerUDP, err := net.FilePacketConn(os.NewFile(InheritedDescriptorsBase+FileDescriptorNum, "listenerUDP"))
 	if err != nil {
+		FileDescriptorsMu.Unlock()
 		dlog.Fatalf("Unable to switch to a different user: %v", err)
 	}
 	FileDescriptorNum++
 
 	listenerTCP, err := net.FileListener(os.NewFile(InheritedDescriptorsBase+FileDescriptorNum, "listenerTCP"))
 	if err != nil {
+		FileDescriptorsMu.Unlock()
 		dlog.Fatalf("Unable to switch to a different user: %v", err)
 	}
 	FileDescriptorNum++
+	FileDescriptorsMu.Unlock()
 
 	dlog.Noticef("Now listening to %v [UDP]", listenUDPAddr)
 	proxy.registerUDPListener(listenerUDP.(*net.UDPConn))
@@ -290,9 +304,17 @@ func (proxy *Proxy) StartProxy() {
 		dlog.Notice("dnscrypt-proxy is waiting for at least one server to be reachable")
 	}
 	go func() {
+		lastLogTime := time.Now()
 		for {
 			clocksmith.Sleep(PrefetchSources(proxy.xTransport, proxy.sources))
 			proxy.updateRegisteredServers()
+
+			// Log WP2 statistics every 5 minutes if debug logging is enabled
+			if time.Since(lastLogTime) > 5*time.Minute {
+				proxy.serversInfo.logWP2Stats()
+				lastLogTime = time.Now()
+			}
+
 			runtime.GC()
 		}
 	}()
@@ -736,6 +758,11 @@ func (proxy *Proxy) processIncomingQuery(
 
 		// Exchange DNS request with the server
 		exchangeResponse, err := handleDNSExchange(proxy, serverInfo, &pluginsState, query, serverProto)
+
+		// Update server statistics for WP2 strategy
+		success := (err == nil && exchangeResponse != nil)
+		proxy.serversInfo.updateServerStats(serverName, success)
+
 		if err != nil || exchangeResponse == nil {
 			return response
 		}
