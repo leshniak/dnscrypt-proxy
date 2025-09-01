@@ -286,7 +286,7 @@ func (xTransport *XTransport) rebuildTransport() {
 	}
 	xTransport.transport = transport
 	if xTransport.http3 {
-		dial := func(ctx context.Context, addrStr string, tlsCfg *tls.Config, cfg *quic.Config) (quic.EarlyConnection, error) {
+		dial := func(ctx context.Context, addrStr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
 			dlog.Debugf("Dialing for H3: [%v]", addrStr)
 			host, port := ExtractHostAndPort(addrStr, stamps.DefaultPort)
 			ipOnly := host
@@ -451,7 +451,7 @@ func (xTransport *XTransport) resolveAndUpdateCache(host string) error {
 				}
 			}
 		} else {
-			err = errors.New("Service is not usable yet")
+			err = errors.New("dnscrypt-proxy service is not usable yet")
 			dlog.Notice(err)
 		}
 	} else {

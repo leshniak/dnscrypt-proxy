@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/sha512"
 	"encoding/binary"
+	"fmt"
 	"sync"
 	"time"
 
@@ -19,7 +20,6 @@ type CachedResponse struct {
 
 type CachedResponses struct {
 	cache     *sievecache.ShardedSieveCache[[32]byte, CachedResponse]
-	cacheMu   sync.Mutex
 	cacheOnce sync.Once
 }
 
@@ -144,12 +144,18 @@ func (plugin *PluginCacheResponse) Eval(pluginsState *PluginsState, msg *dns.Msg
 		expiration: time.Now().Add(ttl),
 		msg:        *msg,
 	}
+	var cacheInitError error
 	cachedResponses.cacheOnce.Do(func() {
 		cache, err := sievecache.NewSharded[[32]byte, CachedResponse](pluginsState.cacheSize)
-		if err == nil {
+		if err != nil {
+			cacheInitError = err
+		} else {
 			cachedResponses.cache = cache
 		}
 	})
+	if cacheInitError != nil {
+		return fmt.Errorf("failed to initialize the cache: %w", cacheInitError)
+	}
 	if cachedResponses.cache != nil {
 		cachedResponses.cache.Insert(cacheKey, cachedResponse)
 	}
