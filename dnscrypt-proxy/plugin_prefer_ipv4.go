@@ -57,6 +57,9 @@ func (plugin *PluginPreferIPv4) Eval(pluginsState *PluginsState, msg *dns.Msg) e
 		false,
 	)
 	plugin.proxy.clientsCountDec()
+	if len(respAPacket) == 0 {
+		return errors.New("Empty response from PreferIPv4 trampoline query")
+	}
 	respA := dns.Msg{}
 	if err := respA.Unpack(respAPacket); err != nil {
 		return err
