@@ -98,11 +98,11 @@ func (s LBStrategyPN) getActiveCount(serversCount int) int {
 type LBStrategyPH struct{}
 
 func (LBStrategyPH) getCandidate(serversCount int) int {
-	return rand.Intn(Max(Min(serversCount, 2), serversCount/2))
+	return rand.Intn((serversCount + 1) / 2)
 }
 
 func (LBStrategyPH) getActiveCount(serversCount int) int {
-	return Max(Min(serversCount, 2), serversCount/2)
+	return (serversCount + 1) / 2
 }
 
 type LBStrategyFirst struct{}
@@ -248,6 +248,9 @@ func (serversInfo *ServersInfo) refresh(proxy *Proxy) (int, error) {
 	registeredServers := make([]RegisteredServer, serversCount)
 	copy(registeredServers, serversInfo.registeredServers)
 	serversInfo.RUnlock()
+	rand.Shuffle(len(registeredServers), func(i, j int) {
+		registeredServers[i], registeredServers[j] = registeredServers[j], registeredServers[i]
+	})
 	countChannel := make(chan struct{}, proxy.certRefreshConcurrency)
 	errorChannel := make(chan error, serversCount)
 	for i := range registeredServers {
@@ -285,7 +288,7 @@ func (serversInfo *ServersInfo) refresh(proxy *Proxy) (int, error) {
 		}
 	}
 	if innerLen > 0 {
-		dlog.Noticef("Server with the lowest initial latency: %s (rtt: %dms)", inner[0].Name, inner[0].initialRtt)
+		dlog.Noticef("Server with the lowest initial latency: %s (rtt: %dms), live servers: %d", inner[0].Name, inner[0].initialRtt, innerLen)
 	}
 	serversInfo.Unlock()
 	return liveServers, err
@@ -658,7 +661,8 @@ func route(proxy *Proxy, name string, serverProto stamps.StampProtoType) (*Relay
 			return nil, err
 		}
 		var relayURLforTarget *url.URL
-		for _, server := range proxy.registeredServers {
+		proxy.serversInfo.RLock()
+		for _, server := range proxy.serversInfo.registeredServers {
 			if server.name != name || server.stamp.Proto != stamps.StampProtoTypeODoHTarget {
 				continue
 			}
@@ -670,6 +674,7 @@ func route(proxy *Proxy, name string, serverProto stamps.StampProtoType) (*Relay
 			relayURLforTarget = &tmp
 			break
 		}
+		proxy.serversInfo.RUnlock()
 		if relayURLforTarget == nil {
 			return nil, fmt.Errorf("Relay [%v] not found", relayName)
 		}

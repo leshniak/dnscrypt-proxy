@@ -52,7 +52,7 @@ func (plugin *PluginQueryLog) Eval(pluginsState *PluginsState, msg *dns.Msg) err
 	question := msg.Question[0]
 	qType, ok := dns.TypeToString[question.Qtype]
 	if !ok {
-		qType = string(qType)
+		qType = fmt.Sprintf("%d", question.Qtype)
 	}
 	if len(plugin.ignoredQtypes) > 0 {
 		for _, ignoredQtype := range plugin.ignoredQtypes {
@@ -73,7 +73,7 @@ func (plugin *PluginQueryLog) Eval(pluginsState *PluginsState, msg *dns.Msg) err
 	}
 	returnCode, ok := PluginsReturnCodeToString[pluginsState.returnCode]
 	if !ok {
-		returnCode = string(returnCode)
+		returnCode = fmt.Sprintf("%d", pluginsState.returnCode)
 	}
 
 	var requestDuration time.Duration
@@ -85,8 +85,10 @@ func (plugin *PluginQueryLog) Eval(pluginsState *PluginsState, msg *dns.Msg) err
 	}
 
 	// Cap at timeout to handle system sleep/suspend
-	if requestDuration > pluginsState.timeout {
-		requestDuration = pluginsState.timeout
+	// Max: UDP + TCP, Dial + (write + read)
+	triedUDPTCPTimeout := 4 * pluginsState.timeout
+	if requestDuration > triedUDPTCPTimeout {
+		requestDuration = triedUDPTCPTimeout
 	}
 	var line string
 	if plugin.format == "tsv" {
