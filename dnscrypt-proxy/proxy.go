@@ -49,7 +49,6 @@ type Proxy struct {
 	localDoHCertKeyFile           string
 	captivePortalMapFile          string
 	localDoHPath                  string
-	mainProto                     string
 	cloakFile                     string
 	forwardFile                   string
 	blockIPFormat                 string
@@ -294,7 +293,7 @@ func (proxy *Proxy) StartProxy() {
 			dlog.Fatal(err)
 		}
 	}
-	proxy.xTransport.internalResolverReady = false
+	proxy.xTransport.internalResolverReady.Store(false)
 	proxy.xTransport.internalResolvers = proxy.listenAddresses
 	liveServers, err := proxy.serversInfo.refresh(proxy)
 	if liveServers > 0 {
@@ -450,7 +449,7 @@ func (proxy *Proxy) udpListener(clientPc *net.UDPConn) {
 			dlog.Debugf("Number of goroutines: %d", runtime.NumGoroutine())
 			proxy.processIncomingQuery(
 				"udp",
-				proxy.mainProto,
+				proxy.xTransport.mainProto,
 				packet,
 				&clientAddr,
 				clientPc,
@@ -461,7 +460,7 @@ func (proxy *Proxy) udpListener(clientPc *net.UDPConn) {
 		}
 		go func() {
 			defer proxy.clientsCountDec()
-			proxy.processIncomingQuery("udp", proxy.mainProto, packet, &clientAddr, clientPc, time.Now(), false)
+			proxy.processIncomingQuery("udp", proxy.xTransport.mainProto, packet, &clientAddr, clientPc, time.Now(), false)
 		}()
 	}
 }
@@ -859,6 +858,9 @@ func (proxy *Proxy) processIncomingQuery(
 		}
 		if serverInfo != nil {
 			pluginsState.serverName = serverName
+			if serverInfo.Relay != nil {
+				pluginsState.relayName = serverInfo.Relay.Name
+			}
 
 			exchangeResponse, err := handleDNSExchange(proxy, serverInfo, &pluginsState, query, serverProto)
 
@@ -875,7 +877,7 @@ func (proxy *Proxy) processIncomingQuery(
 			// Process the response through plugins
 			processedResponse, err := processPlugins(proxy, &pluginsState, query, serverInfo, response)
 			if err != nil {
-				return response
+				return nil
 			}
 
 			response = processedResponse

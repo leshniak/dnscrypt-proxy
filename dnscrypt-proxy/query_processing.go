@@ -5,10 +5,9 @@ import (
 	"net"
 	"time"
 
+	"codeberg.org/miekg/dns"
 	"github.com/jedisct1/dlog"
-	clocksmith "github.com/jedisct1/go-clocksmith"
 	stamps "github.com/jedisct1/go-dnsstamps"
-	"github.com/miekg/dns"
 )
 
 // validateQuery - Performs basic validation on the incoming query
@@ -24,16 +23,11 @@ func validateQuery(query []byte) bool {
 
 // handleSynthesizedResponse - Handles a synthesized DNS response from plugins
 func handleSynthesizedResponse(pluginsState *PluginsState, synth *dns.Msg) ([]byte, error) {
-	var response []byte
-	var err error
-
-	response, err = synth.PackBuffer(response)
-	if err != nil {
+	if err := synth.Pack(); err != nil {
 		pluginsState.returnCode = PluginsReturnCodeParseError
-		// We can't access proxy from pluginsState directly, but the caller will handle logging
+		return nil, err
 	}
-
-	return response, err
+	return synth.Data, nil
 }
 
 // processDNSCryptQuery - Processes a query using the DNSCrypt protocol
@@ -86,14 +80,15 @@ func processDNSCryptQuery(
 
 	// Check for stale response if there was an error
 	if err != nil {
-		serverInfo.noticeFailure(proxy)
 		if stale, ok := pluginsState.sessionData["stale"]; ok {
 			dlog.Debug("Serving stale response")
-			if staleResponse, packErr := (stale.(*dns.Msg)).Pack(); packErr == nil {
-				return staleResponse, nil
+			staleMsg := stale.(*dns.Msg)
+			if packErr := staleMsg.Pack(); packErr == nil {
+				return staleMsg.Data, nil
 			}
 		}
-		// If no stale response was served, return the original error
+		// No stale response available; this is a definitive failure
+		serverInfo.noticeFailure(proxy)
 		if neterr, ok := err.(net.Error); ok && neterr.Timeout() {
 			pluginsState.returnCode = PluginsReturnCodeServerTimeout
 		} else {
@@ -129,20 +124,41 @@ func processDoHQuery(
 		return response, nil
 	}
 
-	serverInfo.noticeFailure(proxy)
-
 	// Attempt to serve a stale response as a fallback.
 	if stale, ok := pluginsState.sessionData["stale"]; ok {
 		dlog.Debug("Serving stale response")
-		if staleResponse, packErr := (stale.(*dns.Msg)).Pack(); packErr == nil {
-			return staleResponse, nil
+		staleMsg := stale.(*dns.Msg)
+		if packErr := staleMsg.Pack(); packErr == nil {
+			return staleMsg.Data, nil
 		}
 	}
 
-	// If no stale response was served, return the original error.
+	// No stale response available; this is a definitive failure
+	serverInfo.noticeFailure(proxy)
 	pluginsState.returnCode = PluginsReturnCodeNetworkError
 	pluginsState.ApplyLoggingPlugins(&proxy.pluginsGlobals)
 	return nil, err
+}
+
+// refreshODoHKey claims the per-server refresh slot, drives the actual
+// refresh, and releases the slot under defer so a panic in refreshServer
+// cannot leak the in-flight flag. It returns the refresh error so the
+// caller can propagate it the way the original 401 handler did.
+func refreshODoHKey(proxy *Proxy, serverInfo *ServerInfo, stamp stamps.ServerStamp) error {
+	if !proxy.serversInfo.beginODoHRefresh(serverInfo.Name, 10*time.Second) {
+		dlog.Debugf("Skipping key update for [%v] (refresh in flight or recently failed)", serverInfo.Name)
+		return nil
+	}
+	success := false
+	defer func() { proxy.serversInfo.endODoHRefresh(serverInfo.Name, success) }()
+	dlog.Infof("Forcing key update for [%v]", serverInfo.Name)
+	if err := proxy.serversInfo.refreshServer(proxy, serverInfo.Name, stamp); err != nil {
+		dlog.Noticef("Key update failed for [%v]", serverInfo.Name)
+		serverInfo.noticeFailure(proxy)
+		return err
+	}
+	success = true
+	return nil
 }
 
 // processODoHQuery - Processes a query using the ODoH protocol
@@ -193,15 +209,20 @@ func processODoHQuery(
 			dlog.Warnf("ODoH relay for [%v] is buggy and returns a 200 status code instead of 401 after a key update", serverInfo.Name)
 		}
 
-		dlog.Infof("Forcing key update for [%v]", serverInfo.Name)
+		var stamp stamps.ServerStamp
+		matched := false
+		proxy.serversInfo.RLock()
 		for _, registeredServer := range proxy.serversInfo.registeredServers {
 			if registeredServer.name == serverInfo.Name {
-				if err = proxy.serversInfo.refreshServer(proxy, registeredServer.name, registeredServer.stamp); err != nil {
-					dlog.Noticef("Key update failed for [%v]", serverInfo.Name)
-					serverInfo.noticeFailure(proxy)
-					clocksmith.Sleep(10 * time.Second)
-				}
+				stamp = registeredServer.stamp
+				matched = true
 				break
+			}
+		}
+		proxy.serversInfo.RUnlock()
+		if matched {
+			if refreshErr := refreshODoHKey(proxy, serverInfo, stamp); refreshErr != nil {
+				err = refreshErr
 			}
 		}
 	} else {
@@ -275,12 +296,12 @@ func processPlugins(
 	}
 
 	if pluginsState.synthResponse != nil {
-		response, err = pluginsState.synthResponse.PackBuffer(response)
-		if err != nil {
+		if err = pluginsState.synthResponse.Pack(); err != nil {
 			pluginsState.returnCode = PluginsReturnCodeParseError
 			pluginsState.ApplyLoggingPlugins(&proxy.pluginsGlobals)
 			return response, err
 		}
+		response = pluginsState.synthResponse.Data
 	}
 
 	// Check rcode and handle failures

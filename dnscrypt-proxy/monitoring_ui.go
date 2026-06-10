@@ -14,9 +14,9 @@ import (
 	"sync"
 	"time"
 
+	"codeberg.org/miekg/dns"
 	"github.com/gorilla/websocket"
 	"github.com/jedisct1/dlog"
-	"github.com/miekg/dns"
 )
 
 // MonitoringUIConfig - Configuration for the monitoring UI
@@ -66,7 +66,7 @@ type MetricsCollector struct {
 
 	// Caching for expensive calculations
 	cacheMutex      sync.RWMutex
-	cachedMetrics   map[string]interface{}
+	cachedMetrics   map[string]any
 	cacheLastUpdate time.Time
 	cacheTTL        time.Duration
 
@@ -170,7 +170,7 @@ func NewMonitoringUI(proxy *Proxy) *MonitoringUI {
 		privacyLevel:       proxy.monitoringUI.PrivacyLevel,
 		// Initialize caching with 1 second TTL
 		cacheTTL:      time.Second,
-		cachedMetrics: make(map[string]interface{}),
+		cachedMetrics: make(map[string]any),
 		// Initialize Prometheus
 		prometheusEnabled: proxy.monitoringUI.PrometheusEnabled,
 		proxy:             proxy,
@@ -324,9 +324,9 @@ func (ui *MonitoringUI) UpdateMetrics(pluginsState PluginsState, msg *dns.Msg) {
 	// Update query types - separate lock
 	if msg != nil && len(msg.Question) > 0 {
 		question := msg.Question[0]
-		qType, ok := dns.TypeToString[question.Qtype]
+		qType, ok := dns.TypeToString[dns.RRToType(question)]
 		if !ok {
-			qType = fmt.Sprintf("%d", question.Qtype)
+			qType = fmt.Sprintf("%d", dns.RRToType(question))
 		}
 		mc.queryTypesMutex.Lock()
 		mc.queryTypes[qType]++
@@ -399,9 +399,9 @@ func (ui *MonitoringUI) UpdateMetrics(pluginsState PluginsState, msg *dns.Msg) {
 		var qType string
 		if msg != nil && len(msg.Question) > 0 {
 			var ok bool
-			qType, ok = dns.TypeToString[msg.Question[0].Qtype]
+			qType, ok = dns.TypeToString[dns.RRToType(msg.Question[0])]
 			if !ok {
-				qType = fmt.Sprintf("%d", msg.Question[0].Qtype)
+				qType = fmt.Sprintf("%d", dns.RRToType(msg.Question[0]))
 			}
 		} else {
 			qType = "unknown"
@@ -485,7 +485,7 @@ func (mc *MetricsCollector) generatePrometheusMetrics() string {
 	// Write help and type information for each metric
 	result.WriteString("# HELP dnscrypt_proxy_build_info A metric with a constant '1' value labeled by version, goversion from which dnscrypt_proxy was built, and the goos and goarch for the build.\n")
 	result.WriteString("# TYPE dnscrypt_proxy_build_info gauge\n")
-	result.WriteString(fmt.Sprintf("dnscrypt_proxy_build_info{goarch=\"%s\" goos=\"%s\" goversion=\"%s\" version=\"%s\"} 1\n", runtime.GOARCH, runtime.GOOS, runtime.Version(), AppVersion))
+	result.WriteString(fmt.Sprintf("dnscrypt_proxy_build_info{goarch=\"%s\", goos=\"%s\", goversion=\"%s\", version=\"%s\"} 1\n", runtime.GOARCH, runtime.GOOS, runtime.Version(), AppVersion))
 
 	result.WriteString("# HELP dnscrypt_proxy_queries_total Total number of DNS queries processed\n")
 	result.WriteString("# TYPE dnscrypt_proxy_queries_total counter\n")
@@ -688,8 +688,8 @@ func (mc *MetricsCollector) collectResolverSnapshots() ([]resolverSnapshot, map[
 	return snapshots, index
 }
 
-func (mc *MetricsCollector) collectCacheStats(cacheHitRatio float64, cacheHits, cacheMisses uint64) map[string]interface{} {
-	stats := map[string]interface{}{
+func (mc *MetricsCollector) collectCacheStats(cacheHitRatio float64, cacheHits, cacheMisses uint64) map[string]any {
+	stats := map[string]any{
 		"enabled":         false,
 		"configured_size": 0,
 		"entries":         0,
@@ -718,12 +718,12 @@ func (mc *MetricsCollector) collectCacheStats(cacheHitRatio float64, cacheHits, 
 	return stats
 }
 
-func (mc *MetricsCollector) collectSourceRefresh() []map[string]interface{} {
+func (mc *MetricsCollector) collectSourceRefresh() []map[string]any {
 	if mc.proxy == nil || len(mc.proxy.sources) == 0 {
 		return nil
 	}
 
-	results := make([]map[string]interface{}, 0, len(mc.proxy.sources))
+	results := make([]map[string]any, 0, len(mc.proxy.sources))
 	now := time.Now()
 
 	for _, source := range mc.proxy.sources {
@@ -765,7 +765,7 @@ func (mc *MetricsCollector) collectSourceRefresh() []map[string]interface{} {
 			status = "stale"
 		}
 
-		entry := map[string]interface{}{
+		entry := map[string]any{
 			"name":        name,
 			"cache_file":  cacheFile,
 			"age_seconds": ageSeconds,
@@ -799,7 +799,7 @@ func (mc *MetricsCollector) invalidateCache() {
 }
 
 // GetMetrics - Returns the current metrics
-func (mc *MetricsCollector) GetMetrics() map[string]interface{} {
+func (mc *MetricsCollector) GetMetrics() map[string]any {
 	// Check cache first
 	mc.cacheMutex.RLock()
 	if time.Since(mc.cacheLastUpdate) < mc.cacheTTL && mc.cachedMetrics != nil {
@@ -858,7 +858,7 @@ func (mc *MetricsCollector) GetMetrics() map[string]interface{} {
 	}
 
 	// Get top domains (limited to 20) sorted by decreasing count
-	topDomainsList := make([]map[string]interface{}, 0)
+	topDomainsList := make([]map[string]any, 0)
 	if mc.privacyLevel < 2 {
 		// Create a slice of domain-count pairs
 		type domainCount struct {
@@ -884,7 +884,7 @@ func (mc *MetricsCollector) GetMetrics() map[string]interface{} {
 		// Take top 20
 		count := 0
 		for _, dc := range domainCounts {
-			topDomainsList = append(topDomainsList, map[string]interface{}{
+			topDomainsList = append(topDomainsList, map[string]any{
 				"domain": html.EscapeString(dc.domain),
 				"count":  dc.count,
 			})
@@ -896,7 +896,7 @@ func (mc *MetricsCollector) GetMetrics() map[string]interface{} {
 	}
 
 	// Get query type distribution sorted by decreasing count and limited to 10
-	queryTypesList := make([]map[string]interface{}, 0)
+	queryTypesList := make([]map[string]any, 0)
 
 	// Create a slice of query type-count pairs
 	type queryTypeCount struct {
@@ -922,7 +922,7 @@ func (mc *MetricsCollector) GetMetrics() map[string]interface{} {
 	// Take top 10
 	count := 0
 	for _, qtc := range queryTypeCounts {
-		queryTypesList = append(queryTypesList, map[string]interface{}{
+		queryTypesList = append(queryTypesList, map[string]any{
 			"type":  qtc.qtype,
 			"count": qtc.count,
 		})
@@ -938,9 +938,9 @@ func (mc *MetricsCollector) GetMetrics() map[string]interface{} {
 	copy(recentQueries, mc.recentQueries)
 	mc.queryLogMutex.RUnlock()
 
-	resolverHealth := make([]map[string]interface{}, 0, len(resolverSnapshots))
+	resolverHealth := make([]map[string]any, 0, len(resolverSnapshots))
 	for _, snapshot := range resolverSnapshots {
-		entry := map[string]interface{}{
+		entry := map[string]any{
 			"name":           snapshot.name,
 			"proto":          snapshot.proto,
 			"status":         snapshot.status,
@@ -968,7 +968,7 @@ func (mc *MetricsCollector) GetMetrics() map[string]interface{} {
 	generatedAt := time.Now().UTC()
 
 	// Return all metrics and cache the result
-	metrics := map[string]interface{}{
+	metrics := map[string]any{
 		"total_queries":      totalQueries,
 		"queries_per_second": queriesPerSecond,
 		"uptime_seconds":     time.Since(startTime).Seconds(),
@@ -1021,8 +1021,7 @@ func (ui *MonitoringUI) handleTestQuery(w http.ResponseWriter, r *http.Request) 
 	setDynamicCacheHeaders(w)
 
 	// Create a fake DNS message
-	msg := &dns.Msg{}
-	msg.SetQuestion("test.example.com.", dns.TypeA)
+	msg := dns.NewMsg("test.example.com.", dns.TypeA)
 
 	// Create a fake plugin state
 	testStart := time.Now().Add(-10 * time.Millisecond)
@@ -1065,8 +1064,8 @@ func (ui *MonitoringUI) handleRoot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Serve the main dashboard page - cache for 5 minutes since template is static
-	setStaticCacheHeaders(w, 300)
+	// Don't cache: ensures the browser revalidates auth before the JS issues /api/metrics and WebSocket calls.
+	setDynamicCacheHeaders(w)
 	w.Header().Set("Content-Type", "text/html")
 	w.Write([]byte(MainHTMLTemplate))
 }
@@ -1075,8 +1074,7 @@ func (ui *MonitoringUI) handleRoot(w http.ResponseWriter, r *http.Request) {
 func (ui *MonitoringUI) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	dlog.Debugf("Received metrics request from %s", r.RemoteAddr)
 
-	// Set CORS headers and dynamic cache headers for API
-	setCORSHeaders(w)
+	// Set dynamic cache headers for API
 	setDynamicCacheHeaders(w)
 
 	// Handle preflight OPTIONS request
@@ -1089,9 +1087,6 @@ func (ui *MonitoringUI) handleMetrics(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 
-	// Check if this is a JSONP request
-	callback := r.URL.Query().Get("callback")
-
 	// Marshal the data to JSON
 	jsonData, err := json.Marshal(metrics)
 	if err != nil {
@@ -1100,16 +1095,7 @@ func (ui *MonitoringUI) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// If it's a JSONP request, wrap the JSON in the callback function
-	if callback != "" {
-		w.Header().Set("Content-Type", "application/javascript")
-		w.Write([]byte(callback + "("))
-		w.Write(jsonData)
-		w.Write([]byte(");"))
-	} else {
-		// Regular JSON response
-		w.Write(jsonData)
-	}
+	w.Write(jsonData)
 }
 
 // handleWebSocket - Handles WebSocket connections
@@ -1169,7 +1155,7 @@ func (ui *MonitoringUI) handleWebSocket(w http.ResponseWriter, r *http.Request) 
 
 		for {
 			// Read message from client
-			var msg map[string]interface{}
+			var msg map[string]any
 			err := conn.ReadJSON(&msg)
 			if err != nil {
 				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {

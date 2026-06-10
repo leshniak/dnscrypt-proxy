@@ -16,6 +16,14 @@ import (
 	netproxy "golang.org/x/net/proxy"
 )
 
+func normalizeLogFormat(format *string) {
+	if len(*format) == 0 {
+		*format = "tsv"
+	} else {
+		*format = strings.ToLower(*format)
+	}
+}
+
 // configureLogging - Configure logging based on the configuration
 func configureLogging(proxy *Proxy, flags *ConfigFlags, config *Config) {
 	if config.LogLevel >= 0 && config.LogLevel < int(dlog.SeverityLast) {
@@ -65,8 +73,7 @@ func configureLogging(proxy *Proxy, flags *ConfigFlags, config *Config) {
 // configureXTransport - Configures the XTransport
 func configureXTransport(proxy *Proxy, config *Config) error {
 	proxy.xTransport.tlsDisableSessionTickets = config.TLSDisableSessionTickets
-	proxy.xTransport.tlsCipherSuite = config.TLSCipherSuite
-	proxy.xTransport.mainProto = proxy.mainProto
+	proxy.xTransport.tlsPreferRSA = config.TLSPreferRSA
 	proxy.xTransport.http3 = config.HTTP3
 	proxy.xTransport.http3Probe = config.HTTP3Probe
 
@@ -120,7 +127,7 @@ func configureXTransport(proxy *Proxy, config *Config) error {
 			return fmt.Errorf("Unable to use the proxy: [%v]", err)
 		}
 		proxy.xTransport.proxyDialer = &proxyDialer
-		proxy.mainProto = "tcp"
+		proxy.xTransport.mainProto = "tcp"
 	}
 
 	proxy.xTransport.rebuildTransport()
@@ -150,7 +157,7 @@ func configureDoHClientAuth(proxy *Proxy, config *Config) error {
 		dlog.Noticef("Enabling TLS authentication")
 		configClientCred := dohClientCreds[0]
 		if len(dohClientCreds) > 1 {
-			dlog.Fatal("Only one tls_client_auth entry is currently supported")
+			dlog.Fatal("Only one doh_client_x509_auth entry is currently supported")
 		}
 		proxy.xTransport.tlsClientCreds = DOHClientCreds{
 			clientCert: configClientCred.ClientCert,
@@ -165,9 +172,6 @@ func configureDoHClientAuth(proxy *Proxy, config *Config) error {
 
 // configureServerParams - Configures server parameters
 func configureServerParams(proxy *Proxy, config *Config) {
-	// Handle legacy response format for blocked queries (handled elsewhere)
-	// This is handled in the main ConfigLoad function
-
 	proxy.blockedQueryResponse = config.BlockedQueryResponse
 	proxy.timeout = time.Duration(config.Timeout) * time.Millisecond
 	proxy.maxClients = config.MaxClients
@@ -176,15 +180,15 @@ func configureServerParams(proxy *Proxy, config *Config) {
 		dlog.Warnf("timeout_load_reduction must be between 0.0 and 1.0, using default 0.75")
 		proxy.timeoutLoadReduction = 0.75
 	}
-	proxy.mainProto = "udp"
+	proxy.xTransport.mainProto = "udp"
 	if config.ForceTCP {
-		proxy.mainProto = "tcp"
+		proxy.xTransport.mainProto = "tcp"
 	}
 
 	// Configure certificate refresh parameters
 	proxy.certRefreshConcurrency = Max(1, config.CertRefreshConcurrency)
 	proxy.certRefreshDelay = time.Duration(Max(60, config.CertRefreshDelay)) * time.Minute
-	proxy.certRefreshDelayAfterFailure = time.Duration(10 * time.Second)
+	proxy.certRefreshDelayAfterFailure = 10 * time.Second
 	proxy.certIgnoreTimestamp = config.CertIgnoreTimestamp
 	proxy.ephemeralKeys = config.EphemeralKeys
 	proxy.monitoringUI = config.MonitoringUI
@@ -211,8 +215,8 @@ func configureLoadBalancing(proxy *Proxy, config *Config) {
 	case "wp2":
 		lbStrategy = LBStrategyWP2{}
 	default:
-		if strings.HasPrefix(lbStrategyStr, "p") {
-			n, err := strconv.ParseInt(strings.TrimPrefix(lbStrategyStr, "p"), 10, 32)
+		if after, ok := strings.CutPrefix(lbStrategyStr, "p"); ok {
+			n, err := strconv.ParseInt(after, 10, 32)
 			if err != nil || n <= 0 {
 				dlog.Warnf("Invalid load balancing strategy: [%s]", config.LBStrategy)
 			} else {
@@ -284,11 +288,7 @@ func configureEDNSClientSubnet(proxy *Proxy, config *Config) error {
 
 // configureQueryLog - Configures query logging
 func configureQueryLog(proxy *Proxy, config *Config) error {
-	if len(config.QueryLog.Format) == 0 {
-		config.QueryLog.Format = "tsv"
-	} else {
-		config.QueryLog.Format = strings.ToLower(config.QueryLog.Format)
-	}
+	normalizeLogFormat(&config.QueryLog.Format)
 	if config.QueryLog.Format != "tsv" && config.QueryLog.Format != "ltsv" {
 		return errors.New("Unsupported query log format")
 	}
@@ -301,11 +301,7 @@ func configureQueryLog(proxy *Proxy, config *Config) error {
 
 // configureNXLog - Configures NX domain logging
 func configureNXLog(proxy *Proxy, config *Config) error {
-	if len(config.NxLog.Format) == 0 {
-		config.NxLog.Format = "tsv"
-	} else {
-		config.NxLog.Format = strings.ToLower(config.NxLog.Format)
-	}
+	normalizeLogFormat(&config.NxLog.Format)
 	if config.NxLog.Format != "tsv" && config.NxLog.Format != "ltsv" {
 		return errors.New("Unsupported NX log format")
 	}
@@ -326,11 +322,7 @@ func configureBlockedNames(proxy *Proxy, config *Config) error {
 		config.BlockName.Format = config.BlockNameLegacy.Format
 		config.BlockName.LogFile = config.BlockNameLegacy.LogFile
 	}
-	if len(config.BlockName.Format) == 0 {
-		config.BlockName.Format = "tsv"
-	} else {
-		config.BlockName.Format = strings.ToLower(config.BlockName.Format)
-	}
+	normalizeLogFormat(&config.BlockName.Format)
 	if config.BlockName.Format != "tsv" && config.BlockName.Format != "ltsv" {
 		return errors.New("Unsupported block log format")
 	}
@@ -344,7 +336,7 @@ func configureBlockedNames(proxy *Proxy, config *Config) error {
 // configureAllowedNames - Configures allowed names
 func configureAllowedNames(proxy *Proxy, config *Config) error {
 	if len(config.AllowedName.File) > 0 && len(config.WhitelistNameLegacy.File) > 0 {
-		return errors.New("Don't specify both [whitelist] and [allowed_names] sections - Update your config file")
+		return errors.New("Don't specify both [allowed_names] and [whitelist] sections - Update your config file")
 	}
 	if len(config.WhitelistNameLegacy.File) > 0 {
 		dlog.Notice("Use of [whitelist] is deprecated - Update your config file")
@@ -352,11 +344,7 @@ func configureAllowedNames(proxy *Proxy, config *Config) error {
 		config.AllowedName.Format = config.WhitelistNameLegacy.Format
 		config.AllowedName.LogFile = config.WhitelistNameLegacy.LogFile
 	}
-	if len(config.AllowedName.Format) == 0 {
-		config.AllowedName.Format = "tsv"
-	} else {
-		config.AllowedName.Format = strings.ToLower(config.AllowedName.Format)
-	}
+	normalizeLogFormat(&config.AllowedName.Format)
 	if config.AllowedName.Format != "tsv" && config.AllowedName.Format != "ltsv" {
 		return errors.New("Unsupported allowed_names log format")
 	}
@@ -378,11 +366,7 @@ func configureBlockedIPs(proxy *Proxy, config *Config) error {
 		config.BlockIP.Format = config.BlockIPLegacy.Format
 		config.BlockIP.LogFile = config.BlockIPLegacy.LogFile
 	}
-	if len(config.BlockIP.Format) == 0 {
-		config.BlockIP.Format = "tsv"
-	} else {
-		config.BlockIP.Format = strings.ToLower(config.BlockIP.Format)
-	}
+	normalizeLogFormat(&config.BlockIP.Format)
 	if config.BlockIP.Format != "tsv" && config.BlockIP.Format != "ltsv" {
 		return errors.New("Unsupported IP block log format")
 	}
@@ -395,11 +379,7 @@ func configureBlockedIPs(proxy *Proxy, config *Config) error {
 
 // configureAllowedIPs - Configures allowed IPs
 func configureAllowedIPs(proxy *Proxy, config *Config) error {
-	if len(config.AllowIP.Format) == 0 {
-		config.AllowIP.Format = "tsv"
-	} else {
-		config.AllowIP.Format = strings.ToLower(config.AllowIP.Format)
-	}
+	normalizeLogFormat(&config.AllowIP.Format)
 	if config.AllowIP.Format != "tsv" && config.AllowIP.Format != "ltsv" {
 		return errors.New("Unsupported allowed_ips log format")
 	}

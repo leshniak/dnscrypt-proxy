@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"codeberg.org/miekg/dns"
 	"github.com/jedisct1/dlog"
-	"github.com/miekg/dns"
 	"golang.org/x/crypto/ed25519"
 )
 
@@ -40,8 +40,7 @@ func FetchCurrentDNSCryptCert(
 	if serverName == nil {
 		serverName = &providerName
 	}
-	query := dns.Msg{}
-	query.SetQuestion(providerName, dns.TypeTXT)
+	query := dns.NewMsg(providerName, dns.TypeTXT)
 	if !strings.HasPrefix(providerName, "2.dnscrypt-cert.") {
 		if relay != nil && !proxy.anonDirectCertFallback {
 			dlog.Warnf(
@@ -61,7 +60,7 @@ func FetchCurrentDNSCryptCert(
 	in, rtt, fragmentsBlocked, err := DNSExchange(
 		proxy,
 		proto,
-		&query,
+		query,
 		serverAddress,
 		relay,
 		serverName,
@@ -78,7 +77,7 @@ func FetchCurrentDNSCryptCert(
 	for _, answerRr := range in.Answer {
 		var txt string
 		if t, ok := answerRr.(*dns.TXT); !ok {
-			dlog.Noticef("[%v] Extra record of type [%v] found in certificate", *serverName, answerRr.Header().Rrtype)
+			dlog.Noticef("[%v] Extra record of type [%v] found in certificate", *serverName, dns.RRToType(answerRr))
 			continue
 		} else {
 			txt = strings.Join(t.Txt, "")
@@ -113,7 +112,7 @@ func FetchCurrentDNSCryptCert(
 		tsBegin := binary.BigEndian.Uint32(binCert[116:120])
 		tsEnd := binary.BigEndian.Uint32(binCert[120:124])
 		if tsBegin >= tsEnd {
-			dlog.Warnf("[%v] certificate ends before it starts (%v >= %v)", *serverName, tsBegin, tsEnd)
+			dlog.Warnf("[%v] certificate has invalid time range: start >= end (%v >= %v)", *serverName, tsBegin, tsEnd)
 			continue
 		}
 		ttl := tsEnd - tsBegin
@@ -136,9 +135,6 @@ func FetchCurrentDNSCryptCert(
 			} else {
 				dlog.Debugf("[%v] certificate still valid for %d days", *serverName, daysLeft)
 			}
-			certInfo.ForwardSecurity = false
-		} else {
-			certInfo.ForwardSecurity = true
 		}
 		if !proxy.certIgnoreTimestamp {
 			if now > tsEnd || now < tsBegin {
@@ -153,7 +149,7 @@ func FetchCurrentDNSCryptCert(
 			}
 		}
 		if serial < highestSerial {
-			dlog.Debugf("[%v] Superseded by a previous certificate", *serverName)
+			dlog.Debugf("[%v] Superseded by a more recent certificate", *serverName)
 			continue
 		}
 		if serial == highestSerial {
@@ -168,6 +164,7 @@ func FetchCurrentDNSCryptCert(
 			dlog.Noticef("[%v] Cryptographic construction %v not supported", *serverName, cryptoConstruction)
 			continue
 		}
+		certInfo.ForwardSecurity = ttl <= 86400*7
 		var serverPk [32]byte
 		copy(serverPk[:], binCert[72:104])
 		sharedKey := ComputeSharedKey(cryptoConstruction, &proxy.proxySecretKey, &serverPk, &providerName)
