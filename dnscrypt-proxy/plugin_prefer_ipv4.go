@@ -71,8 +71,7 @@ func (plugin *PluginPreferIPv4) Eval(pluginsState *PluginsState, msg *dns.Msg) e
 	}
 	hasAAnswer := false
 	for _, answer := range respA.Answer {
-		header := answer.Header()
-		if dns.RRToType(header) == dns.TypeA {
+		if dns.RRToType(answer) == dns.TypeA {
 			hasAAnswer = true
 			break
 		}
@@ -143,9 +142,7 @@ func (plugin *PluginPreferIPv4Response) Eval(pluginsState *PluginsState, msg *dn
 	}
 	synth := EmptyResponseFromMessage(msg)
 	for _, answer := range msg.Answer {
-		header := answer.Header()
-
-		if dns.RRToType(header) == dns.TypeHTTPS {
+		if dns.RRToType(answer) == dns.TypeHTTPS {
 			originalAnswer := answer.(*dns.HTTPS)
 
 			synthAnswer := new(dns.HTTPS)
