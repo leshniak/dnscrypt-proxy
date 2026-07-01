@@ -135,50 +135,89 @@ func (plugin *PluginPreferIPv4Response) Reload() error {
 	return nil
 }
 
+func hasIPv4Hint(value []svcb.Pair) bool {
+	for _, pair := range value {
+		if _, ok := pair.(*svcb.IPV4HINT); ok {
+			return true
+		}
+	}
+	return false
+}
+
+func hasIPv6Hint(value []svcb.Pair) bool {
+	for _, pair := range value {
+		if _, ok := pair.(*svcb.IPV6HINT); ok {
+			return true
+		}
+	}
+	return false
+}
+
 func (plugin *PluginPreferIPv4Response) Eval(pluginsState *PluginsState, msg *dns.Msg) error {
 	question := msg.Question[0]
 	if question.Header().Class != dns.ClassINET || dns.RRToType(question) != dns.TypeHTTPS {
 		return nil
 	}
-	synth := EmptyResponseFromMessage(msg)
+
+	// We must only rewrite the response when there is genuinely something to
+	// strip: an HTTPS record that advertises BOTH an IPv4 and an IPv6 hint.
+	//
+	// Why the strict guard: synthesizing goes through EmptyResponseFromMessage,
+	// a shared helper we deliberately do not modify. Since the miekg/dns v2
+	// migration it no longer copies the source Rcode nor the authority/additional
+	// sections. Blindly synthesizing therefore masked NXDOMAIN/SERVFAIL as
+	// NOERROR and dropped the SOA of NODATA answers. For names without an HTTPS
+	// record (e.g. reddit.com), that turned a clean NODATA into a NOERROR reply
+	// carrying a bogus HINFO, which clients like Firefox reject ("server not
+	// found") on first load. When there is nothing to filter we leave the
+	// upstream response completely untouched.
+	if msg.Rcode != dns.RcodeSuccess {
+		return nil
+	}
+	needsFiltering := false
 	for _, answer := range msg.Answer {
-		if dns.RRToType(answer) == dns.TypeHTTPS {
-			originalAnswer := answer.(*dns.HTTPS)
-
-			synthAnswer := new(dns.HTTPS)
-			synthAnswer.Hdr = *originalAnswer.Header()
-			synthAnswer.Priority = originalAnswer.Priority
-			synthAnswer.Target = originalAnswer.Target
-			synthAnswer.SVCB = originalAnswer.SVCB
-
-			hasIPv4Hint := false
-			for _, pair := range originalAnswer.Value {
-				if _, ok := pair.(*svcb.IPV4HINT); ok {
-					hasIPv4Hint = true
-					break
-				}
-			}
-
-			if hasIPv4Hint {
-				filtered := make([]svcb.Pair, 0, len(originalAnswer.Value))
-
-				for _, pair := range originalAnswer.Value {
-					if _, ok := pair.(*svcb.IPV6HINT); !ok {
-						filtered = append(filtered, pair)
-					}
-				}
-
-				synthAnswer.Value = filtered
-			} else {
-				synthAnswer.Value = make([]svcb.Pair, len(originalAnswer.Value))
-				copy(synthAnswer.Value, originalAnswer.Value)
-			}
-
-			synth.Answer = append(synth.Answer, synthAnswer)
-		} else {
-			synth.Answer = append(synth.Answer, answer)
+		if https, ok := answer.(*dns.HTTPS); ok &&
+			hasIPv4Hint(https.Value) && hasIPv6Hint(https.Value) {
+			needsFiltering = true
+			break
 		}
 	}
+	if !needsFiltering {
+		return nil
+	}
+
+	synth := EmptyResponseFromMessage(msg)
+	// EmptyResponseFromMessage drops these; restore them so we only alter the
+	// IPv6 hints and nothing else about the response.
+	synth.Rcode = msg.Rcode
+	synth.Ns = msg.Ns
+	synth.Extra = msg.Extra
+	for _, answer := range msg.Answer {
+		originalAnswer, ok := answer.(*dns.HTTPS)
+		if !ok || !hasIPv4Hint(originalAnswer.Value) {
+			// Not an HTTPS record, or no IPv4 hint to prefer: keep as-is so a
+			// host without IPv4 still receives its IPv6 hint.
+			synth.Answer = append(synth.Answer, answer)
+			continue
+		}
+		synthAnswer := new(dns.HTTPS)
+		synthAnswer.Hdr = *originalAnswer.Header()
+		synthAnswer.Priority = originalAnswer.Priority
+		synthAnswer.Target = originalAnswer.Target
+		synthAnswer.Value = make([]svcb.Pair, 0, len(originalAnswer.Value))
+		for _, pair := range originalAnswer.Value {
+			if _, ok := pair.(*svcb.IPV6HINT); !ok {
+				synthAnswer.Value = append(synthAnswer.Value, pair)
+			}
+		}
+		synth.Answer = append(synth.Answer, synthAnswer)
+	}
+	// Leave an informational marker so the user can tell that filtering
+	// happened (e.g. in dig output). This is safe here because we only reach
+	// this point when a real HTTPS record was actually filtered, so the
+	// answer still carries valid SVCB data alongside the HINFO - unlike the
+	// previous unconditional append, which injected a HINFO into NODATA/
+	// NXDOMAIN replies and broke clients.
 	hinfo := new(dns.HINFO)
 	hinfo.Hdr = dns.Header{
 		Name: question.Header().Name, Class: dns.ClassINET, TTL: 86400,
