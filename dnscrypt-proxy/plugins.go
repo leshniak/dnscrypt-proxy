@@ -82,7 +82,6 @@ type PluginsState struct {
 	timeout                          time.Duration
 	returnCode                       PluginsReturnCode
 	maxPayloadSize                   int
-	cacheSize                        int
 	originalMaxPayloadSize           int
 	maxUnencryptedUDPSafePayloadSize int
 	rejectTTL                        uint32
@@ -261,7 +260,6 @@ func NewPluginsState(
 		maxPayloadSize:                   MaxDNSUDPPacketSize - ResponseOverhead,
 		clientProto:                      clientProto,
 		clientAddr:                       clientAddr,
-		cacheSize:                        proxy.cacheSize,
 		cacheNegMinTTL:                   proxy.cacheNegMinTTL,
 		cacheNegMaxTTL:                   proxy.cacheNegMaxTTL,
 		cacheMinTTL:                      proxy.cacheMinTTL,
@@ -348,8 +346,8 @@ func (pluginsState *PluginsState) ApplyResponsePlugins(
 	if err := msg.Unpack(); err != nil {
 		return packet, err
 	}
-	if len(msg.Question) != 1 {
-		return packet, errors.New("Unexpected number of questions in response")
+	if err := validateResponseForQuery(pluginsState.questionMsg, &msg); err != nil {
+		return packet, err
 	}
 	switch Rcode(packet) {
 	case dns.RcodeSuccess:
@@ -386,6 +384,9 @@ func (pluginsState *PluginsState) ApplyResponsePlugins(
 			}
 		}
 		pluginsGlobals.RUnlock()
+	}
+	if err := validateResponseForQuery(pluginsState.questionMsg, &msg); err != nil {
+		return packet, err
 	}
 	if err := msg.Pack(); err != nil {
 		return packet, err
